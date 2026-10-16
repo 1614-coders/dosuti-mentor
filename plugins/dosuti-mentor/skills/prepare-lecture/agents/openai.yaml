@@ -1,0 +1,4 @@
+interface:
+  display_name: "Добавить лекцию"
+  short_description: "Собрать видео, код и материалы локального курса"
+  default_prompt: "Используй $prepare-lecture, чтобы добавить занятие в мой курс."

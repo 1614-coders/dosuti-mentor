@@ -1,0 +1,11 @@
+{
+  "name": "dosuti-mentor",
+  "version": "0.4.32",
+  "description": "Помощник в обучении: цели, лекции, код и практика",
+  "skills": "./skills/",
+  "extensions": {
+    "com.openai": {
+      "onboardingSkill": "./skills/start-learning/SKILL.md"
+    }
+  }
+}

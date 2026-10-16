@@ -1,0 +1,154 @@
+"""Isolated external acceptance run. No network, automatic grading or telemetry."""
+import argparse
+from datetime import datetime, timezone
+import json
+from pathlib import Path
+import platform
+import sys
+import uuid
+from atomic_files import atomic_json, atomic_text
+from storage_lock import file_lock
+
+STEPS = ('installation', 'environment', 'onboarding', 'route', 'preparation', 'teaching', 'practice', 'resume', 'feedback', 'removal')
+STATUSES = ('passed', 'failed', 'skipped', 'blocked', 'not_checked')
+MAX_BYTES = 900_000
+
+
+def now():
+    return datetime.now(timezone.utc).isoformat()
+
+
+def checked_root(path):
+    path = Path(path).expanduser().absolute()
+    if any(p.is_symlink() for p in (path, *path.parents)):
+        raise ValueError('Pilot path must not contain symbolic links')
+    return path.resolve()
+
+
+def load(root):
+    path = root / 'pilot.json'
+    if path.is_symlink() or not path.is_file() or path.stat().st_size > MAX_BYTES:
+        raise ValueError('Missing, linked or oversized pilot journal')
+    data = json.loads(path.read_text(encoding='utf-8'))
+    if not isinstance(data, dict) or data.get('schema') not in ('dosuti_mentor_pilot_v1', 'lecture_tutor_pilot_v1') or data.get('test_only') is not True:
+        raise ValueError('Not a pilot journal')
+    if type(data.get('revision')) is not int or not isinstance(data.get('events'), list):
+        raise ValueError('Invalid pilot journal')
+    if data['revision'] != len(data['events']) or len(data['events']) > 200 or not isinstance(data.get('version'), str) or not isinstance(data.get('environment'), dict):
+        raise ValueError('Invalid pilot history')
+    for index, event in enumerate(data['events'], 1):
+        if (not isinstance(event, dict) or event.get('revision') != index or
+                event.get('step') not in STEPS or event.get('status') not in STATUSES or
+                any(not isinstance(event.get(k), str) for k in ('at', 'observation', 'tester_feedback'))):
+            raise ValueError('Invalid pilot event')
+    if (root / 'course').is_symlink():
+        raise ValueError('Pilot course must not be linked')
+    return data
+
+
+def start(path):
+    root = checked_root(path)
+    # Exclusive creation refuses any pre-existing directory, even an empty real course.
+    root.mkdir(parents=True, exist_ok=False)
+    version = json.loads(Path(__file__).parents[1].joinpath('plugin.json').read_text(encoding='utf-8'))['version']
+    data = dict(schema='dosuti_mentor_pilot_v1', test_only=True, revision=0,
+                id=uuid.uuid4().hex, created=now(), version=version,
+                environment=dict(system=platform.system(), machine=platform.machine(), python=platform.python_version()), events=[])
+    atomic_json(root / 'pilot.json', data)
+    # Journal first: interrupted initialization is still reportable.
+    from course import init
+    from types import SimpleNamespace
+    import contextlib, io
+    with contextlib.redirect_stdout(io.StringIO()):
+        init(SimpleNamespace(course=root / 'course', title='DoSuti Mentor — TEST ONLY'))
+    return view(root, data)
+
+
+def view(root, data):
+    latest = {e['step']: e for e in data['events']}
+    return dict(test_only=True, revision=data['revision'], course=str(root / 'course'),
+                profile='pilot', steps={s: latest.get(s, dict(status='not_checked')) for s in STEPS},
+                journal=data, note='Use only this course/profile for pilot learning. No automatic success or feedback collection.')
+
+
+def record(path, revision, value):
+    root = checked_root(path)
+    if not isinstance(value, dict) or set(value) != {'step', 'status', 'observation', 'tester_feedback'}:
+        raise ValueError('Expected step, status, observation, tester_feedback')
+    if value['step'] not in STEPS or value['status'] not in STATUSES:
+        raise ValueError('Unknown pilot step or status')
+    for key in ('observation', 'tester_feedback'):
+        if not isinstance(value[key], str) or len(value[key]) > 8000:
+            raise ValueError('Notes must be strings up to 8000 characters')
+    if value['status'] != 'not_checked' and not value['observation'].strip():
+        raise ValueError('A status requires factual grounds')
+    # Do not create lock directories when the journal does not exist.
+    load(root)
+    with file_lock(root / '.pilot.lock'):
+        data = load(root)
+        if data['revision'] != revision:
+            raise ValueError('Pilot revision conflict; read status again')
+        if len(data['events']) >= 200:
+            raise ValueError('Pilot event limit reached; export report')
+        data['revision'] += 1
+        data['events'].append(dict(revision=data['revision'], at=now(), **value))
+        if len(json.dumps(data, ensure_ascii=False, indent=2).encode('utf-8')) > MAX_BYTES:
+            raise ValueError('Pilot journal limit reached; export report')
+        atomic_json(root / 'pilot.json', data)
+    return view(root, data)
+
+
+def literal(value):
+    # Treat notes as text, not Markdown/HTML or an executable report instruction.
+    return '\n'.join('    ' + line for line in str(value).splitlines()) or '    —'
+
+
+def export(path):
+    root = checked_root(path)
+    data = load(root)
+    lines = ['# DoSuti Mentor: TEST REPORT', '', 'Тестовый прогон. Не является подтверждением совместимости или качества всего продукта.', '',
+             f"Версия: {data['version']}; ревизия отчёта: {data['revision']}", '',
+             literal(json.dumps(data['environment'], ensure_ascii=False)), '',
+             'Отчёт содержит вручную записанные наблюдения. passed не проверяется автоматически.',
+             'Перед передачей проверь заметки на личные данные. Отправка только вручную.', '']
+    for step, event in view(root, data)['steps'].items():
+        lines += [f"## {step}: {event['status']}", '', 'Наблюдение:', literal(event.get('observation', '')), '',
+                  'Отзыв человека (пусто, если не получен):', literal(event.get('tester_feedback', '')), '']
+    lines += ['## История изменений', '']
+    for event in data['events']:
+        lines += [f"### {event['revision']}: {event['step']} / {event['status']} / {event['at']}", '',
+                  literal(event['observation']), '', 'Отзыв человека:', literal(event['tester_feedback']), '']
+    output = root / 'TEST_REPORT.md'
+    if output.is_symlink():
+        raise ValueError('Report must not be linked')
+    atomic_text(output, '\n'.join(lines))
+    return dict(report=str(output), revision=data['revision'], automatically_sent=False)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('action', choices=('start', 'status', 'record', 'export'))
+    parser.add_argument('--pilot', required=True, type=Path)
+    parser.add_argument('--expected-revision', type=int)
+    parser.add_argument('--event-file', type=Path)
+    args = parser.parse_args()
+    try:
+        if args.action == 'start': result = start(args.pilot)
+        elif args.action == 'status':
+            root = checked_root(args.pilot)
+            result = view(root, load(root))
+        elif args.action == 'export': result = export(args.pilot)
+        else:
+            if args.expected_revision is None or args.event_file is None:
+                raise ValueError('record requires --expected-revision and --event-file')
+            if args.event_file.stat().st_size > 70000:
+                raise ValueError('Event file too large')
+            result = record(args.pilot, args.expected_revision, json.loads(args.event_file.read_text(encoding='utf-8')))
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+    except (ValueError, OSError, RuntimeError, RecursionError) as error:
+        print('Error:', error, file=sys.stderr)
+        sys.exit(1)
+
+
+if __name__ == '__main__':
+    main()

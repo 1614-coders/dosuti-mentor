@@ -1,0 +1,20 @@
+{
+  "name": "dosuti-mentor-local",
+  "interface": {
+    "displayName": "DoSuti Mentor"
+  },
+  "plugins": [
+    {
+      "name": "dosuti-mentor",
+      "source": {
+        "source": "local",
+        "path": "./plugins/dosuti-mentor"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

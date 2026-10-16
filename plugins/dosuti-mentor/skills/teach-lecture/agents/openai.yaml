@@ -1,0 +1,4 @@
+interface:
+  display_name: "Учиться по лекции"
+  short_description: "Разбирать лекцию в чате с кадрами и примерами кода"
+  default_prompt: "Используй $teach-lecture, чтобы продолжить занятие по моему курсу."

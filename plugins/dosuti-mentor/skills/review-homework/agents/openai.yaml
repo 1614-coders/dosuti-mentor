@@ -1,0 +1,4 @@
+interface:
+  display_name: "Проверить домашку"
+  short_description: "Проверять понимание и домашку, сохраняя прогресс"
+  default_prompt: "Используй $review-homework, чтобы проверить мою работу по лекции."
