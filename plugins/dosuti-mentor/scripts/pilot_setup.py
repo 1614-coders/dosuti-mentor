@@ -182,7 +182,7 @@ def prepare(args):
     if root.exists(): read(root)
     else:
         root.mkdir(parents=True, exist_ok=False)
-        save(root, dict(schema=SCHEMA, test_only=True, attempts=[]))
+        save(root, dict(schema=SCHEMA, test_only=True, owner=uuid.uuid4().hex, attempts=[]))
     lock = root / '.setup.lock';checked(lock)
     with file_lock(lock, timeout=.1):
         value = read(root)
@@ -208,7 +208,8 @@ def prepare(args):
                     raise RuntimeError(f'{name} failed; returncode={result["returncode"]}; timeout={result["timed_out"]}; see {log.name}; output tail: {result["output"][-3000:]}')
                 event.update(status='passed', observation=f'Completed in {time.monotonic()-started:.2f}s; log={log.name}')
             except Exception as error:
-                event.update(status='failed', observation=redact(str(error))[:8000]);save(root, value);raise
+                event.update(status='failed', observation=redact(str(error))[:8000], seconds=round(time.monotonic()-started,6), finished=now(), timing_method='monotonic');save(root, value);raise
+            event.update(seconds=round(time.monotonic()-started,6), finished=now(), timing_method='monotonic')
             save(root, value);print(f'[{name}] passed', flush=True)
         try:
             if sys.version_info < (3, 11): raise ValueError('Python3.11+ required; use3.12 for the pilot')
@@ -255,8 +256,8 @@ def prepare(args):
             journal = pilot.load(run_root)
             pilot.record(run_root, journal['revision'], dict(step='environment', status='passed',
                 observation=f'CPU smoke pipeline completed. Setup attempt{number}; dependency versions and earlier failures: ../SETUP_REPORT.md. ASR accuracy not established.', tester_feedback=''))
-            pilot.export(run_root)
             attempt.update(status='passed', finished=now(), project=str(project), pilot=str(run_root));save(root, value)
+            pilot.export(run_root)
             return dict(status='passed', project=str(project), pilot=str(run_root), setup_report=str(root / 'SETUP_REPORT.md'),
                 report=str(run_root / 'TEST_REPORT.md'), next_step='Open this project in Codex; invoke $test-learning. New chats in the same project can discover this QA run.')
         except Exception as error:

@@ -213,13 +213,15 @@ def acquire(directory, video, fragments=4, site_timeout=1800, quality='best'):
         if site:
             record_download_status(assets, source, status='running',adapter='yt-dlp',fragments=fragments,timeout=site_timeout)
         try:
-            parsed = urlsplit(source)
-            if parsed.hostname in ('disk.yandex.ru', 'disk.yandex.com', 'yadi.sk'):
-                downloaded, adapter = fetch_yandex(source, staging)
-            elif Path(parsed.path).suffix.lower() in MEDIA_EXTENSIONS:
-                downloaded, adapter = fetch_direct(source, staging)
-            else:
-                downloaded, adapter = fetch_site(source, staging, fragments, site_timeout, quality)
+            from pilot_activity import span
+            with span('download', scope=directory):
+                parsed = urlsplit(source)
+                if parsed.hostname in ('disk.yandex.ru', 'disk.yandex.com', 'yadi.sk'):
+                    downloaded, adapter = fetch_yandex(source, staging)
+                elif Path(parsed.path).suffix.lower() in MEDIA_EXTENSIONS:
+                    downloaded, adapter = fetch_direct(source, staging)
+                else:
+                    downloaded, adapter = fetch_site(source, staging, fragments, site_timeout, quality)
             checksum = check_hash(downloaded, video.get('sha256'))
             validate_media(downloaded)
             # Unique immutable asset prevents overwriting an older cached file.

@@ -860,66 +860,68 @@ def main():
             command.add_argument('--file')
     args = parser.parse_args()
     try:
-        if args.command == 'spoken-homework':
-            from spoken_homework import dispatch
-            print(json.dumps(dispatch(args), ensure_ascii=False, indent=2))
-            return
-        if args.command=='compact':
-            from compact_lesson import dispatch
-            print(json.dumps(dispatch(args),ensure_ascii=False,indent=2))
-        elif args.command=='ocr-frame':
-            from screen_ocr import view
-            print(json.dumps(view(args),ensure_ascii=False,indent=2))
-        elif args.command=='career-route':
-            from career_route import route
-            print(json.dumps(route(args),ensure_ascii=False,indent=2))
-        elif args.command=='career':
-            from career_evidence import career
-            print(json.dumps(career(args),ensure_ascii=False,indent=2))
-        elif args.command=='study-next':
-            from adaptive_learning import study_next
-            print(json.dumps(study_next(args),ensure_ascii=False,indent=2))
-        elif args.command=='learn-unit':
-            from unit_learning import learn_unit
-            print(json.dumps(learn_unit(args),ensure_ascii=False,indent=2))
-        elif args.command=='unit':
-            from study_units import unit
-            print(json.dumps(unit(args),ensure_ascii=False,indent=2))
-        elif args.command=='project-timeline':
-            from project_timeline import timeline
-            print(json.dumps(timeline(args),ensure_ascii=False,indent=2))
-        elif args.command=='research':
-            from topic_research import research
-            print(json.dumps(research(args),ensure_ascii=False,indent=2))
-        elif args.command=='intent':
-            from learning_intent import intent
-            print(json.dumps(intent(args),ensure_ascii=False,indent=2))
-        elif args.command=='cleanup-job':
-            from job_cleanup import cleanup_job
-            print(json.dumps(cleanup_job(args),ensure_ascii=False,indent=2))
-        elif args.command in ('download-plan','doctor','cleanup-plan'):
-            from maintenance import dispatch
-            print(json.dumps(dispatch(args),ensure_ascii=False,indent=2))
-        elif args.command=='storage-report':
-            from storage_report import storage_report
-            print(json.dumps(storage_report(args),ensure_ascii=False,indent=2))
-        elif args.command=='term-note':
-            from term_notes import term_note
-            print(json.dumps(term_note(args),ensure_ascii=False,indent=2))
-        elif args.command=='fragments':
-            from fragment_selection import fragments
-            print(json.dumps(fragments(args),ensure_ascii=False,indent=2))
-        elif args.command=='code-stage':
-            from code_stages import code_stage
-            print(json.dumps(code_stage(args),ensure_ascii=False,indent=2))
-        elif args.command=='resource':
-            from material_sources import resource
-            print(json.dumps(resource(args),ensure_ascii=False,indent=2))
-        elif args.command in ('settings','resume','topic','search','project-map'):
-            import learning_tools
-            print(json.dumps(getattr(learning_tools,args.command.replace('-','_'))(args),ensure_ascii=False,indent=2))
-        else:
-            globals()[args.command.replace('-', '_')](args)
+        from pilot_activity import course_scope
+        with course_scope(getattr(args, "course", None), args.command):
+            if args.command == 'spoken-homework':
+                from spoken_homework import dispatch
+                print(json.dumps(dispatch(args), ensure_ascii=False, indent=2))
+                return
+            if args.command=='compact':
+                from compact_lesson import dispatch
+                print(json.dumps(dispatch(args),ensure_ascii=False,indent=2))
+            elif args.command=='ocr-frame':
+                from screen_ocr import view
+                print(json.dumps(view(args),ensure_ascii=False,indent=2))
+            elif args.command=='career-route':
+                from career_route import route
+                print(json.dumps(route(args),ensure_ascii=False,indent=2))
+            elif args.command=='career':
+                from career_evidence import career
+                print(json.dumps(career(args),ensure_ascii=False,indent=2))
+            elif args.command=='study-next':
+                from adaptive_learning import study_next
+                print(json.dumps(study_next(args),ensure_ascii=False,indent=2))
+            elif args.command=='learn-unit':
+                from unit_learning import learn_unit
+                print(json.dumps(learn_unit(args),ensure_ascii=False,indent=2))
+            elif args.command=='unit':
+                from study_units import unit
+                print(json.dumps(unit(args),ensure_ascii=False,indent=2))
+            elif args.command=='project-timeline':
+                from project_timeline import timeline
+                print(json.dumps(timeline(args),ensure_ascii=False,indent=2))
+            elif args.command=='research':
+                from topic_research import research
+                print(json.dumps(research(args),ensure_ascii=False,indent=2))
+            elif args.command=='intent':
+                from learning_intent import intent
+                print(json.dumps(intent(args),ensure_ascii=False,indent=2))
+            elif args.command=='cleanup-job':
+                from job_cleanup import cleanup_job
+                print(json.dumps(cleanup_job(args),ensure_ascii=False,indent=2))
+            elif args.command in ('download-plan','doctor','cleanup-plan'):
+                from maintenance import dispatch
+                print(json.dumps(dispatch(args),ensure_ascii=False,indent=2))
+            elif args.command=='storage-report':
+                from storage_report import storage_report
+                print(json.dumps(storage_report(args),ensure_ascii=False,indent=2))
+            elif args.command=='term-note':
+                from term_notes import term_note
+                print(json.dumps(term_note(args),ensure_ascii=False,indent=2))
+            elif args.command=='fragments':
+                from fragment_selection import fragments
+                print(json.dumps(fragments(args),ensure_ascii=False,indent=2))
+            elif args.command=='code-stage':
+                from code_stages import code_stage
+                print(json.dumps(code_stage(args),ensure_ascii=False,indent=2))
+            elif args.command=='resource':
+                from material_sources import resource
+                print(json.dumps(resource(args),ensure_ascii=False,indent=2))
+            elif args.command in ('settings','resume','topic','search','project-map'):
+                import learning_tools
+                print(json.dumps(getattr(learning_tools,args.command.replace('-','_'))(args),ensure_ascii=False,indent=2))
+            else:
+                globals()[args.command.replace('-', '_')](args)
     except (ValueError, OSError, RuntimeError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
         print('Error:', error, file=sys.stderr)
         sys.exit(1)

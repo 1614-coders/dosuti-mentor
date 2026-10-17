@@ -27,6 +27,8 @@ def checked_root(path):
 
 
 def load(root):
+    if (root / '.cleanup-pending.json').exists():
+        raise ValueError('Pilot cleanup is pending; resume cleanup instead of learning')
     path = root / 'pilot.json'
     if path.is_symlink() or not path.is_file() or path.stat().st_size > MAX_BYTES:
         raise ValueError('Missing, linked or oversized pilot journal')
@@ -42,6 +44,8 @@ def load(root):
                 event.get('step') not in STEPS or event.get('status') not in STATUSES or
                 any(not isinstance(event.get(k), str) for k in ('at', 'observation', 'tester_feedback'))):
             raise ValueError('Invalid pilot event')
+    if not isinstance(data.get('id'), str) or not data['id']:
+        raise ValueError('Invalid pilot identity')
     if (root / 'course').is_symlink():
         raise ValueError('Pilot course must not be linked')
     return data
@@ -54,7 +58,7 @@ def start(path):
     version = json.loads(Path(__file__).parents[1].joinpath('plugin.json').read_text(encoding='utf-8'))['version']
     data = dict(schema='dosuti_mentor_pilot_v1', test_only=True, revision=0,
                 id=uuid.uuid4().hex, created=now(), version=version,
-                environment=dict(system=platform.system(), machine=platform.machine(), python=platform.python_version()), events=[])
+                cleanup_owner=uuid.uuid4().hex, environment=dict(system=platform.system(), machine=platform.machine(), python=platform.python_version()), events=[])
     atomic_json(root / 'pilot.json', data)
     # Journal first: interrupted initialization is still reportable.
     from course import init
@@ -104,7 +108,7 @@ def literal(value):
     return '\n'.join('    ' + line for line in str(value).splitlines()) or '    —'
 
 
-def export(path):
+def export(path, output=None):
     root = checked_root(path)
     data = load(root)
     lines = ['# DoSuti Mentor: TEST REPORT', '', 'Тестовый прогон. Не является подтверждением совместимости или качества всего продукта.', '',
@@ -119,7 +123,9 @@ def export(path):
     for event in data['events']:
         lines += [f"### {event['revision']}: {event['step']} / {event['status']} / {event['at']}", '',
                   literal(event['observation']), '', 'Отзыв человека:', literal(event['tester_feedback']), '']
-    output = root / 'TEST_REPORT.md'
+    from pilot_report import sections, output_path
+    lines += sections(root)
+    output = output_path(root, output)
     if output.is_symlink():
         raise ValueError('Report must not be linked')
     atomic_text(output, '\n'.join(lines))
@@ -212,10 +218,17 @@ def main():
         for stream in (sys.stdout, sys.stderr):
             if hasattr(stream, 'reconfigure'): stream.reconfigure(encoding='utf-8')
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action', choices=('start', 'status', 'record', 'export', 'connect-project', 'project-status'))
+    parser.add_argument('action', choices=('start', 'status', 'record', 'export', 'connect-project', 'project-status', 'activity-start', 'activity-finish', 'activity-status', 'assessment-plan', 'assessment-answer', 'assessment-status', 'cleanup-plan', 'cleanup-apply'))
     parser.add_argument('--pilot', type=Path)
     parser.add_argument('--project', type=Path)
     parser.add_argument('--chat')
+    parser.add_argument('--output', type=Path)
+    parser.add_argument('--stage')
+    parser.add_argument('--session', default='')
+    parser.add_argument('--detail', default='')
+    parser.add_argument('--activity')
+    parser.add_argument('--result', choices=('passed','failed','interrupted'), default='passed')
+    parser.add_argument('--plan-file', type=Path)
     parser.add_argument('--runtime', type=Path)
     parser.add_argument('--model-path', type=Path)
     parser.add_argument('--expected-revision', type=int)
@@ -233,7 +246,25 @@ def main():
         elif args.action == 'status':
             root = checked_root(args.pilot)
             result = view(root, load(root))
-        elif args.action == 'export': result = export(args.pilot)
+        elif args.action == 'export': result = export(args.pilot, args.output)
+        elif args.action.startswith('activity-'):
+            import pilot_activity as activity
+            root = checked_root(args.pilot)
+            if args.action == 'activity-start': result = activity.start(root,args.stage,args.session,args.detail)
+            elif args.action == 'activity-finish': result = activity.finish(root,args.activity,args.result,args.detail)
+            else: result = activity.read(root)
+        elif args.action.startswith('assessment-'):
+            import pilot_assessment as assessment
+            root = checked_root(args.pilot)
+            if args.action == 'assessment-status': result = assessment.read(root)
+            else:
+                if args.event_file is None or args.event_file.stat().st_size>200000: raise ValueError('Bounded --event-file required')
+                result = assessment.record(root,args.expected_revision,args.action.split('-')[1],json.loads(args.event_file.read_text(encoding='utf-8')))
+        elif args.action.startswith('cleanup-'):
+            import pilot_cleanup as cleanup
+            if args.action == 'cleanup-plan': result = cleanup.plan(args.pilot,args.output)
+            else: result = cleanup.apply(args.pilot,args.plan_file)
+
         else:
             if args.expected_revision is None or args.event_file is None:
                 raise ValueError('record requires --expected-revision and --event-file')
