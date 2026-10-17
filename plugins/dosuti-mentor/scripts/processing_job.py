@@ -161,11 +161,14 @@ def process(args, ffmpeg, out):
             print(f'Loading local model {model_path}…', flush=True)
             with span('model_load', scope=out):
                 model = WhisperModel(str(model_path), device='cpu', compute_type='int8', cpu_threads=4)
+                from bounded_features import BoundedFeatureExtractor
+                model.feature_extractor = BoundedFeatureExtractor(model.feature_extractor)
     if not previous:
         with span('asr', scope=out):
             import numpy as np
             with wave.open(str(out / 'audio.wav'), 'rb') as wav:
-                audio = np.frombuffer(wav.readframes(wav.getnframes()), dtype='<i2').astype(np.float32) / 32768.0
+                audio = np.frombuffer(wav.readframes(wav.getnframes()), dtype='<i2').astype(np.float32)
+                audio /= 32768.0
             if metadata['audio_quality']['status'] in ('silent','no_audio_track'):
                 from types import SimpleNamespace
                 segments, info = iter([]), SimpleNamespace(language=args.language)
@@ -188,7 +191,8 @@ def process(args, ffmpeg, out):
             atomic_text(out / 'transcript.md', '# Автоматическое распознавание; требует проверки\n\n' +
                         '\n\n'.join(f'[{r["start"]:.2f}–{r["end"]:.2f}] {r["text"]}' for r in records))
             stages['recognition'] = dict(settings=settings, sha256=file_hash(out / 'transcript.json'),
-                info=dict(model=str(model_path), language=info.language, segments=len(records)))
+                info=dict(model=str(model_path), language=info.language, segments=len(records),
+                          feature_extraction='bounded_logmel_v1'))
             persist(out, state)
     metadata['recognition'] = stages['recognition']['info']
     if not metadata['recognition']['segments']:

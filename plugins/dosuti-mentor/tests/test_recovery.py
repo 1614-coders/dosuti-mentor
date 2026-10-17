@@ -63,6 +63,7 @@ class JobRecovery(unittest.TestCase):
         class Model:
             def __init__(self, *a, **kw):
                 owner.loads.append(True)
+                self.feature_extractor = NS()
             def transcribe(self, *a, **kw):
                 owner.recognitions.append(True)
                 time.sleep(.05)
