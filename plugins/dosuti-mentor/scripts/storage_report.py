@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import shutil
 import stat
+import re
 
 CATEGORIES = {'prepared':'prepared_evidence','evidence':'screen_evidence','.jobs':'processing_work',
               'code':'teacher_code','materials':'attached_materials','homework':'homework'}
@@ -26,6 +27,7 @@ def inventory(root, max_entries=200000):
     root=Path(root).expanduser().resolve()
     if not root.is_dir():raise ValueError('Course folder is missing')
     stack=[root];groups={};seen=set();largest=[];errors=[]
+    recovery_files=recovery_bytes=0
     count=logical=allocated=unique=links=special=visited=0;limited=False;allocation_available=True
     error_count=0
     def failure(path):
@@ -47,6 +49,8 @@ def inventory(root, max_entries=200000):
                         if stat.S_ISDIR(info.st_mode):stack.append(path);continue
                         if not stat.S_ISREG(info.st_mode):special+=1;continue
                         relative=path.relative_to(root);key=group(relative.parts)
+                        if len(relative.parts)==3 and relative.parts[0]=='learners' and re.fullmatch(r'unit-learning\.json\.[0-9a-f]{32}\.tmp',relative.name):
+                            recovery_files+=1;recovery_bytes+=info.st_size
                         row=groups.setdefault(key,dict(lesson=key[0],category=key[1],files=0,logical_bytes=0))
                         size=info.st_size;row['files']+=1;row['logical_bytes']+=size;count+=1;logical+=size
                         identity=(info.st_dev,info.st_ino) if info.st_ino else ('path',str(relative))
@@ -70,6 +74,8 @@ def inventory(root, max_entries=200000):
         largest_files=[dict(path=name,logical_bytes=size) for size,name in sorted(largest,reverse=True)],
         skipped=dict(symbolic_links=links,special_files=special,error_count=error_count,error_paths=errors),
         filesystem_free_bytes=free,reclaimable_bytes=None,
+        recovery_artifacts=dict(unit_journal_temporaries=recovery_files,logical_bytes=recovery_bytes,
+            deletion_verified=False,next_step='Run cleanup-progress --course COURSE --profile PROFILE to inspect under writer locks; --apply removes only validated abandoned files.'),
         limitations=['Inventory is not an atomic snapshot; processing may change files during scanning.',
             'Logical bytes count each file path, including hard links. Allocated file bytes count each file ID once when supported; directories, shared APFS extents and quotas are not measured.',
             'External source videos, shared models/runtime and symlink targets are not traversed.',

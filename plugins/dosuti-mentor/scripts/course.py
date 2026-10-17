@@ -692,10 +692,10 @@ def make_portable(args):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest='command', required=True)
-    for name in ['init', 'add-lesson', 'attach', 'prepare', 'progress', 'bind', 'status', 'context', 'frame', 'scan-screen', 'diff-code', 'history', 'make-portable', 'settings', 'resume', 'topic', 'search', 'project-map', 'resource', 'code-stage', 'term-note', 'storage-report', 'download-plan', 'doctor', 'cleanup-plan', 'cleanup-job', 'fragments', 'intent', 'unit', 'learn-unit', 'research', 'project-timeline', 'study-next', 'career', 'career-route', 'ocr-frame', 'compact', 'spoken-homework']:
+    for name in ['init', 'add-lesson', 'attach', 'prepare', 'progress', 'bind', 'status', 'context', 'frame', 'scan-screen', 'diff-code', 'history', 'make-portable', 'settings', 'resume', 'topic', 'search', 'project-map', 'resource', 'code-stage', 'term-note', 'storage-report', 'download-plan', 'doctor', 'cleanup-plan', 'cleanup-progress', 'cleanup-job', 'fragments', 'intent', 'unit', 'learn-unit', 'research', 'project-timeline', 'study-next', 'career', 'career-route', 'ocr-frame', 'compact', 'spoken-homework']:
         command = commands.add_parser(name)
         command.add_argument('--course', type=Path, required=True)
-        if name in ['status', 'progress', 'bind', 'context', 'history', 'settings', 'resume', 'intent', 'learn-unit', 'study-next', 'career-route']:
+        if name in ['status', 'progress', 'bind', 'context', 'history', 'settings', 'resume', 'intent', 'learn-unit', 'study-next', 'career-route', 'cleanup-progress']:
             command.add_argument('--profile', default='default')
         if name in ['status','context','intent','learn-unit','study-next','career-route']:
             command.add_argument('--session',help='Stable ID for this learning session/chat task')
@@ -754,6 +754,8 @@ def main():
             command.add_argument('--expected-revision',type=int)
             command.add_argument('--reason')
             command.add_argument('--history-limit',type=int,default=0)
+        elif name == 'cleanup-progress':
+            command.add_argument('--apply',action='store_true')
         elif name == 'cleanup-job':
             command.add_argument('--lesson',required=True)
             command.add_argument('--job-key',required=True)
@@ -896,6 +898,9 @@ def main():
             elif args.command=='intent':
                 from learning_intent import intent
                 print(json.dumps(intent(args),ensure_ascii=False,indent=2))
+            elif args.command=='cleanup-progress':
+                from progress_cleanup import cleanup
+                print(json.dumps(cleanup(args),ensure_ascii=False,indent=2))
             elif args.command=='cleanup-job':
                 from job_cleanup import cleanup_job
                 print(json.dumps(cleanup_job(args),ensure_ascii=False,indent=2))
