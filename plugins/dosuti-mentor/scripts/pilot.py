@@ -9,6 +9,7 @@ import sys
 import uuid
 from atomic_files import atomic_json, atomic_text
 from storage_lock import file_lock
+from pilot_lifecycle import protected, active
 
 STEPS = ('installation', 'environment', 'onboarding', 'route', 'preparation', 'teaching', 'practice', 'resume', 'feedback', 'removal')
 STATUSES = ('passed', 'failed', 'skipped', 'blocked', 'not_checked')
@@ -27,8 +28,7 @@ def checked_root(path):
 
 
 def load(root):
-    if (root / '.cleanup-pending.json').exists():
-        raise ValueError('Pilot cleanup is pending; resume cleanup instead of learning')
+    active(root)
     path = root / 'pilot.json'
     if path.is_symlink() or not path.is_file() or path.stat().st_size > MAX_BYTES:
         raise ValueError('Missing, linked or oversized pilot journal')
@@ -69,13 +69,15 @@ def start(path):
     return view(root, data)
 
 
-def view(root, data):
+def view(root, data, session=None):
     latest = {e['step']: e for e in data['events']}
-    return dict(test_only=True, revision=data['revision'], course=str(root / 'course'),
+    from pilot_resume import continuation
+    return dict(continuation=continuation(root,session), test_only=True, revision=data['revision'], course=str(root / 'course'),
                 profile='pilot', steps={s: latest.get(s, dict(status='not_checked')) for s in STEPS},
                 journal=data, note='Use only this course/profile for pilot learning. No automatic success or feedback collection.')
 
 
+@protected
 def record(path, revision, value):
     root = checked_root(path)
     if not isinstance(value, dict) or set(value) != {'step', 'status', 'observation', 'tester_feedback'}:
@@ -108,6 +110,7 @@ def literal(value):
     return '\n'.join('    ' + line for line in str(value).splitlines()) or '    —'
 
 
+@protected
 def export(path, output=None):
     root = checked_root(path)
     data = load(root)
@@ -123,19 +126,21 @@ def export(path, output=None):
     for event in data['events']:
         lines += [f"### {event['revision']}: {event['step']} / {event['status']} / {event['at']}", '',
                   literal(event['observation']), '', 'Отзыв человека:', literal(event['tester_feedback']), '']
-    from pilot_report import sections, output_path
-    lines += sections(root)
+    from pilot_report import collect, headline, output_path
+    details,coverage,info = collect(root)
+    lines = lines[:9] + headline(data,coverage,info) + lines[9:] + details
     output = output_path(root, output)
     if output.is_symlink():
         raise ValueError('Report must not be linked')
-    atomic_text(output, '\n'.join(lines))
-    return dict(report=str(output), revision=data['revision'], automatically_sent=False)
+    from atomic_files import atomic_chunks
+    atomic_chunks(output, (line+'\n' for line in lines))
+    return dict(report=str(output), revision=data['revision'], coverage=coverage, automatically_sent=False)
 
 
 PROJECT_SCHEMA = 'dosuti_pilot_project_v1'
 
 
-def project_marker(project):
+def project_marker(project, allow_pending=False):
     from profile_storage import checked
     project = checked_root(project)
     checked(project, True)
@@ -149,10 +154,11 @@ def project_marker(project):
             or not value['pilot_path'].strip()):
         raise ValueError('Invalid pilot project marker; preserve it before repair')
     root = checked_root(project / value['pilot_path'])
-    load(root)
+    if not allow_pending: load(root)
     return root
 
 
+@protected
 def connect_project(path, project, expected_revision, runtime=None, model_path=None):
     """Explicit connection to a dedicated empty or already-owned test project."""
     from types import SimpleNamespace
@@ -197,19 +203,22 @@ def connect_project(path, project, expected_revision, runtime=None, model_path=N
         return project_status(project)
 
 
-def project_status(project, chat=None):
+def project_status(project, chat=None, session=None):
     import connection
     project = checked_root(project)
     if not project.is_dir(): raise ValueError('Project directory missing')
-    root = project_marker(project)
+    root = project_marker(project,allow_pending=True)
     if root is None: return dict(test_only=False, connected=False, reason='No pilot marker in this project')
+    from pilot_lifecycle import pending
+    recovery=pending(root)
+    if recovery: return dict(test_only=True,connected=False,pilot=str(root),project=str(project),recovery=recovery)
     selected = connection.status(project, chat)
     binding = selected.get('binding') or {}
     matches = (selected['enabled'] and selected['course_status'] == 'available'
                and binding.get('course_path') == str(root / 'course') and binding.get('profile') == 'pilot'
                and not selected['needs_chat_id'])
     return dict(test_only=True, connected=matches, pilot=str(root), project=str(project),
-                connection=selected, **({'run': view(root, load(root))} if matches else
+                connection=selected, **({'run': view(root, load(root),session)} if matches else
                 {'reason': 'Respect the current chat/project connection; do not switch courses automatically.'}))
 
 
@@ -227,6 +236,7 @@ def main():
     parser.add_argument('--session', default='')
     parser.add_argument('--detail', default='')
     parser.add_argument('--activity')
+    parser.add_argument('--allow-unknown-owner', action='store_true')
     parser.add_argument('--result', choices=('passed','failed','interrupted'), default='passed')
     parser.add_argument('--plan-file', type=Path)
     parser.add_argument('--runtime', type=Path)
@@ -237,21 +247,22 @@ def main():
     try:
         if args.action == 'project-status':
             if args.project is None: raise ValueError('project-status requires --project')
-            result = project_status(args.project, args.chat)
+            result = project_status(args.project, args.chat, args.session or None)
         elif args.action == 'connect-project':
             if args.pilot is None or args.project is None: raise ValueError('connect-project requires --pilot and --project')
             result = connect_project(args.pilot, args.project, args.expected_revision, args.runtime, args.model_path)
         elif args.pilot is None: raise ValueError('--pilot is required')
         elif args.action == 'start': result = start(args.pilot)
         elif args.action == 'status':
+            from pilot_lifecycle import pending
             root = checked_root(args.pilot)
-            result = view(root, load(root))
+            result = pending(root) or view(root, load(root),args.session or None)
         elif args.action == 'export': result = export(args.pilot, args.output)
         elif args.action.startswith('activity-'):
             import pilot_activity as activity
             root = checked_root(args.pilot)
             if args.action == 'activity-start': result = activity.start(root,args.stage,args.session,args.detail)
-            elif args.action == 'activity-finish': result = activity.finish(root,args.activity,args.result,args.detail)
+            elif args.action == 'activity-finish': result = activity.finish(root,args.activity,args.result,args.detail,session=args.session,allow_unknown_owner=args.allow_unknown_owner)
             else: result = activity.read(root)
         elif args.action.startswith('assessment-'):
             import pilot_assessment as assessment

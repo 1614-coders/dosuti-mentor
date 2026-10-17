@@ -14,6 +14,7 @@ from atomic_files import atomic_json, atomic_text
 from pilot_assessment import digest
 from profile_storage import checked
 from storage_lock import file_lock
+from pilot_lifecycle import protected, guard
 
 MARKER='.cleanup-pending.json'
 
@@ -77,6 +78,7 @@ def idle(pilot):
         raise ValueError('Finish or mark interrupted activities before cleanup')
 
 
+@protected(timeout=.1)
 def plan(pilot, output):
     from pilot import checked_root, export
     pilot=checked_root(pilot);root,owner=owned(pilot)
@@ -86,17 +88,20 @@ def plan(pilot, output):
     # The exported report and receipt live beside the plan; never replace arbitrary existing files.
     report=output.with_name(output.stem+'-report.md');receipt=output.with_name(output.stem+'-receipt.json')
     if any(p.exists() for p in (output,report,receipt)): raise ValueError('Choose unused external output names')
-    for p in (root/'.pilot-use.lock',pilot/'.activities.lock',pilot/'.assessment.lock'):
+    for p in (pilot/'.activities.lock',pilot/'.assessment.lock',pilot/'.pilot.lock'):
         checked(p)
         with file_lock(p,timeout=.1): pass
     with ExitStack() as stack:
-        for path in lock_paths(root): stack.enter_context(file_lock(path,timeout=.1))
+        for path in lock_paths(root):
+            if path!=pilot/'.pilot-use.lock': stack.enter_context(file_lock(path,timeout=.1,create_parent=False))
         idle(pilot)
         if root!=pilot:
             from pilot_setup import read
             if any(a['status']=='running' for a in read(root)['attempts']): raise ValueError('Setup is running')
-        export(pilot,report)
-        value=dict(schema='pilot_cleanup_v1',root=str(root),pilot=str(pilot),owner=owner,
+        exported=export(pilot,report)
+        if not exported['coverage']['complete']:
+            raise ValueError('Incomplete report; cleanup refused. Preserve original journals and inspect the exported diagnostics')
+        value=dict(schema='pilot_cleanup_v2',coverage=exported['coverage'],root=str(root),pilot=str(pilot),owner=owner,
                    report=str(report),report_sha256=digest(report),receipt=str(receipt),entries=inventory(root))
         value['seal']=seal(value);atomic_json(output,value)
     return dict(plan=str(output),report=str(report),files=len(value['entries']),
@@ -104,13 +109,17 @@ def plan(pilot, output):
                 requires_explicit_apply=True,plugin_and_chat_history='Separate Codex removal required')
 
 
-def apply(pilot, plan_file):
+def _apply(pilot, plan_file):
     from pilot import checked_root, load
     if plan_file is None: raise ValueError('--plan-file required')
     path=checked_root(plan_file)
     if not path.is_file() or path.stat().st_size>12_000_000: raise ValueError('Missing or oversized cleanup plan')
     value=json.loads(path.read_text(encoding='utf-8'));signature=value.pop('seal',None)
-    if value.get('schema')!='pilot_cleanup_v1' or seal(value)!=signature: raise ValueError('Cleanup plan changed')
+    if value.get('schema')!='pilot_cleanup_v2' or seal(value)!=signature: raise ValueError('Cleanup plan changed or legacy plan; generate a new plan with export coverage')
+    coverage=value.get('coverage')
+    if (not isinstance(coverage,dict) or coverage.get('schema')!='pilot_export_coverage_v1' or coverage.get('complete') is not True
+            or not coverage.get('entries') or any(e.get('status')!='complete' or e.get('detected')!=e.get('exported') for e in coverage['entries'])):
+        raise ValueError('Incomplete export coverage; cleanup refused')
     root=checked_root(value['root']);pilot=checked_root(pilot)
     if str(pilot)!=value['pilot'] or not pilot.is_relative_to(root) or path.is_relative_to(root): raise ValueError('Cleanup path mismatch')
     for name in ('report','receipt'):
@@ -135,7 +144,10 @@ def apply(pilot, plan_file):
         actual,owner=owned(pilot)
         if actual!=root or owner!=value['owner']: raise ValueError('Cleanup ownership changed')
     with ExitStack() as stack:
-        for lock in lock_paths(root): stack.enter_context(file_lock(lock,timeout=.1))
+        if not continuing: stack.enter_context(guard(pilot,timeout=.1))
+        for lock in lock_paths(root):
+            if continuing or lock!=pilot/'.pilot-use.lock':
+                stack.enter_context(file_lock(lock,timeout=.1,create_parent=False))
         if not continuing: idle(pilot)
         current=inventory(root);expected=value['entries']
         if any(name not in expected or expected[name]!=item for name,item in current.items()) or (not continuing and current!=expected):
@@ -166,3 +178,13 @@ def apply(pilot, plan_file):
     atomic_json(receipt,dict(schema='pilot_cleanup_receipt_v1',seal=signature,status='test_data_removed',
         root=str(root),report=str(report),plugin_removed=False,chat_history_removed=False))
     return dict(status='test_data_removed',receipt=str(receipt),report=str(report),plugin_removed=False,chat_history_removed=False)
+
+
+def apply(pilot, plan_file):
+    if plan_file is None: raise ValueError('--plan-file required')
+    from pilot import checked_root
+    path=checked_root(plan_file)
+    if not path.is_file(): raise ValueError('Cleanup plan missing')
+    lock=path.with_name(path.name+'.apply.lock');checked(lock)
+    with file_lock(lock,timeout=.1,create_parent=False):
+        return _apply(pilot,path)

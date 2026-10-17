@@ -32,3 +32,15 @@ def atomic_bytes(path, raw):
             stream.write(raw);stream.flush();os.fsync(stream.fileno())
         temporary.replace(path)
     finally:temporary.unlink(missing_ok=True)
+
+
+def atomic_chunks(path, chunks):
+    """Publish a report incrementally; never expose a half-written destination."""
+    path=Path(path);path.parent.mkdir(parents=True,exist_ok=True)
+    temporary=path.with_name(path.name+'.'+uuid.uuid4().hex+'.tmp')
+    try:
+        with temporary.open('w',encoding='utf-8',newline='\n') as stream:
+            for chunk in chunks: stream.write(chunk)
+            stream.flush();os.fsync(stream.fileno())
+        temporary.replace(path)
+    finally: temporary.unlink(missing_ok=True)

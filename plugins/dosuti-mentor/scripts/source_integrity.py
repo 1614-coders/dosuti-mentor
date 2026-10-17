@@ -14,6 +14,12 @@ def identity(path):
     value=Path(path).stat()
     return (value.st_dev,value.st_ino,value.st_size,value.st_mtime_ns,value.st_ctime_ns)
 
+def drift(path,before,after,stage):
+    names=('device','inode','size','mtime_ns','ctime_ns')
+    changes={name:dict(before=old,after=new) for name,old,new in zip(names,before,after) if old!=new}
+    return ValueError('Source changed during '+stage+': '+json.dumps(dict(file=str(Path(path).absolute()),changes=changes),ensure_ascii=False))
+
+
 def verification_session(function):
     """Reuse hashes only within one read operation; recheck identities before return."""
     @wraps(function)
@@ -23,7 +29,8 @@ def verification_session(function):
         try:
             result=function(*args,**kwargs)
             for name,(before,_) in cache.items():
-                if identity(name)!=before:raise ValueError("Source changed during verification")
+                after=identity(name)
+                if after!=before:raise drift(name,before,after,'verification')
             return result
         finally:_VERIFICATION.reset(token)
     return wrapped
@@ -32,11 +39,12 @@ def verification_session(function):
 def file_hash(path):
     path=Path(path);name=str(path.absolute());before=identity(path);cache=_VERIFICATION.get()
     if cache is not None and name in cache:
-        if cache[name][0]!=before:raise ValueError('Source changed during verification')
+        if cache[name][0]!=before:raise drift(path,cache[name][0],before,'verification')
         return cache[name][1]
     with path.open('rb') as stream:
         checksum=hashlib.file_digest(stream, 'sha256').hexdigest()
-    if identity(path)!=before:raise ValueError('Source changed during hashing')
+    after=identity(path)
+    if after!=before:raise drift(path,before,after,'hashing')
     if cache is not None:cache[name]=(before,checksum)
     return checksum
 

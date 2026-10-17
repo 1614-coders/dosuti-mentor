@@ -7,6 +7,7 @@ from atomic_files import atomic_json
 from profile_storage import checked
 from storage_lock import file_lock
 from pilot_activity import timestamp
+from pilot_lifecycle import protected
 
 
 def digest(path):
@@ -130,6 +131,7 @@ def stale(root, plan):
     return result
 
 
+@protected
 def record(root, revision, kind, value):
     from pilot import checked_root
     root=checked_root(root);read(root)
@@ -139,7 +141,7 @@ def record(root, revision, kind, value):
         if len(data['events'])>=500: raise ValueError('Assessment history limit reached')
         if kind=='plan': saved=validate_plan(root,value)
         elif kind=='answer':
-            if not isinstance(value,dict) or set(value)!={'lesson','plan_revision','question','session','answer','hints','verdict','evaluation'}:
+            if not isinstance(value,dict) or set(value)-{'learning_ref'}!={'lesson','plan_revision','question','session','answer','hints','verdict','evaluation'}:
                 raise ValueError('Invalid answer fields')
             plan=latest(data,value['lesson'])
             if plan is None or type(value['plan_revision']) is not int or plan['revision']!=value['plan_revision']:
@@ -149,6 +151,8 @@ def record(root, revision, kind, value):
             text(value['session'],160);text(value['answer']);text(value['evaluation'])
             if type(value['hints']) is not int or not 0<=value['hints']<=100: raise ValueError('Invalid hint count')
             if value['verdict'] not in ('correct','partial','incorrect','ungraded','skipped'): raise ValueError('Unknown verdict')
+            from pilot_links import validate
+            validate(value.get('learning_ref'))
             saved=value
         else: raise ValueError('Unknown assessment operation')
         event=dict(revision=data['revision']+1,at=timestamp(),type=kind,value=saved)

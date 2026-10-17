@@ -38,6 +38,8 @@ def safe_path(path):
 
 
 def read(root):
+    from pilot_lifecycle import active
+    active(root)
     path = root / 'setup.json';checked(path)
     if not path.is_file() or path.stat().st_size > MAX_BYTES: raise ValueError('Missing or oversized setup journal')
     value = json.loads(path.read_text(encoding='utf-8'))

@@ -7,9 +7,9 @@ import time
 
 
 @contextmanager
-def file_lock(path, timeout=30):
+def file_lock(path, timeout=30, create_parent=True):
     path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
+    if create_parent: path.parent.mkdir(parents=True, exist_ok=True)
     with path.open('a+b') as stream:
         if os.name == 'nt':
             import msvcrt
