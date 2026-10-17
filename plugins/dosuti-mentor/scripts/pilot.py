@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 import json
 from pathlib import Path
 import platform
+import os
 import sys
 import uuid
 from atomic_files import atomic_json, atomic_text
@@ -125,15 +126,110 @@ def export(path):
     return dict(report=str(output), revision=data['revision'], automatically_sent=False)
 
 
+PROJECT_SCHEMA = 'dosuti_pilot_project_v1'
+
+
+def project_marker(project):
+    from profile_storage import checked
+    project = checked_root(project)
+    checked(project, True)
+    path = project / '.dosuti-pilot.json'
+    checked(path)
+    if not path.exists(): return None
+    if path.stat().st_size > 16000: raise ValueError('Pilot project marker too large')
+    value = json.loads(path.read_text(encoding='utf-8'))
+    if (not isinstance(value, dict) or set(value) != {'schema', 'pilot_path'}
+            or value['schema'] != PROJECT_SCHEMA or not isinstance(value['pilot_path'], str)
+            or not value['pilot_path'].strip()):
+        raise ValueError('Invalid pilot project marker; preserve it before repair')
+    root = checked_root(project / value['pilot_path'])
+    load(root)
+    return root
+
+
+def connect_project(path, project, expected_revision, runtime=None, model_path=None):
+    """Explicit connection to a dedicated empty or already-owned test project."""
+    from types import SimpleNamespace
+    import connection
+    from profile_storage import checked
+    import os
+    root = checked_root(path);load(root)
+    project = checked_root(project)
+    if (project.is_relative_to(Path(__file__).resolve().parents[1])
+            or project.is_relative_to(root / 'course') or root.is_relative_to(project)):
+        raise ValueError('Choose a separate dedicated test project outside the course/plugin')
+    project.mkdir(parents=True, exist_ok=True);checked(project, True)
+    if project_marker(project) is None and any(p.name != '.pilot-project.lock' for p in project.iterdir()):
+        raise ValueError('Use an empty dedicated test project; existing project files are preserved')
+    lock = project / '.pilot-project.lock';checked(lock)
+    with file_lock(lock, timeout=.1):
+        checked(lock)
+        owner = project_marker(project)
+        if owner is not None and owner != root: raise ValueError('Project belongs to another pilot')
+        current = connection.status(project)
+        if type(expected_revision) is not int or current['revision'] != expected_revision:
+            raise ValueError('Connection revision conflict; read project status again')
+        selected = current.get('binding') or {}
+        if (current['enabled'] and (selected.get('course_path') != str(root / 'course')
+                                   or selected.get('profile') != 'pilot')):
+            raise ValueError('Project is connected to another course; do not replace it for QA')
+        if owner is None and any(p.name != '.pilot-project.lock' for p in project.iterdir()):
+            raise ValueError('Use an empty dedicated test project; existing project files are preserved')
+        if owner is None:
+            try: relative = os.path.relpath(root, project)
+            except ValueError: relative = str(root)
+            # Marker first allows recovery if connection writing is interrupted.
+            atomic_json(project / '.dosuti-pilot.json', dict(schema=PROJECT_SCHEMA, pilot_path=relative))
+        if current['enabled']:
+            for key, requested in (('runtime', runtime), ('model_path', model_path)):
+                if requested is not None and selected.get(key) != str(Path(requested).expanduser().resolve()):
+                    raise ValueError('Project runtime/model differs; update the connection explicitly')
+        if not current['enabled']:
+            connection.dispatch(SimpleNamespace(project=project, action='connect', scope='project', chat=None,
+                course=root / 'course', profile='pilot', runtime=runtime, model_path=model_path,
+                expected_revision=expected_revision))
+        return project_status(project)
+
+
+def project_status(project, chat=None):
+    import connection
+    project = checked_root(project)
+    if not project.is_dir(): raise ValueError('Project directory missing')
+    root = project_marker(project)
+    if root is None: return dict(test_only=False, connected=False, reason='No pilot marker in this project')
+    selected = connection.status(project, chat)
+    binding = selected.get('binding') or {}
+    matches = (selected['enabled'] and selected['course_status'] == 'available'
+               and binding.get('course_path') == str(root / 'course') and binding.get('profile') == 'pilot'
+               and not selected['needs_chat_id'])
+    return dict(test_only=True, connected=matches, pilot=str(root), project=str(project),
+                connection=selected, **({'run': view(root, load(root))} if matches else
+                {'reason': 'Respect the current chat/project connection; do not switch courses automatically.'}))
+
+
 def main():
+    if os.name == 'nt':
+        for stream in (sys.stdout, sys.stderr):
+            if hasattr(stream, 'reconfigure'): stream.reconfigure(encoding='utf-8')
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action', choices=('start', 'status', 'record', 'export'))
-    parser.add_argument('--pilot', required=True, type=Path)
+    parser.add_argument('action', choices=('start', 'status', 'record', 'export', 'connect-project', 'project-status'))
+    parser.add_argument('--pilot', type=Path)
+    parser.add_argument('--project', type=Path)
+    parser.add_argument('--chat')
+    parser.add_argument('--runtime', type=Path)
+    parser.add_argument('--model-path', type=Path)
     parser.add_argument('--expected-revision', type=int)
     parser.add_argument('--event-file', type=Path)
     args = parser.parse_args()
     try:
-        if args.action == 'start': result = start(args.pilot)
+        if args.action == 'project-status':
+            if args.project is None: raise ValueError('project-status requires --project')
+            result = project_status(args.project, args.chat)
+        elif args.action == 'connect-project':
+            if args.pilot is None or args.project is None: raise ValueError('connect-project requires --pilot and --project')
+            result = connect_project(args.pilot, args.project, args.expected_revision, args.runtime, args.model_path)
+        elif args.pilot is None: raise ValueError('--pilot is required')
+        elif args.action == 'start': result = start(args.pilot)
         elif args.action == 'status':
             root = checked_root(args.pilot)
             result = view(root, load(root))
