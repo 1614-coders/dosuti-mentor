@@ -25,7 +25,7 @@ class Setup(unittest.TestCase):
         self.args=NS(root=self.root,video=self.video,runtime=None,model_path=None,offline=False,
                      model='tiny',seconds=10,start=0,language='ru')
         self.commands=[]
-    def fake(self,command,timeout):
+    def fake(self,command,timeout,**kwargs):
         self.commands.append(command)
         if '--worker' in command:
             worker=command[command.index('--worker')+1]
@@ -48,7 +48,7 @@ class Setup(unittest.TestCase):
         self.assertTrue(any('lecture.py' in ' '.join(c) for c in self.commands))
         self.assertEqual(len(setup.read(self.root)['attempts']),1)
     def test_failure_before_course_creation_is_reported_and_retry_preserves_it(self):
-        def fail(command,timeout):return dict(returncode=17,timed_out=False,output='pip failed: QA')
+        def fail(command,timeout,**kwargs):return dict(returncode=17,timed_out=False,output='pip failed: QA')
         with patch.object(setup,'run',fail),contextlib.redirect_stdout(io.StringIO()):
             with self.assertRaisesRegex(RuntimeError,'partial report'):setup.prepare(self.args)
         self.assertFalse((self.root/'run').exists())
@@ -130,6 +130,29 @@ class Setup(unittest.TestCase):
             with self.assertRaisesRegex(ValueError,'No recognized speech'):
                 setup.smoke_check(folder,self.base/'verified.json')
         self.assertFalse((self.base/'verified.json').exists())
+
+    def test_log_is_visible_and_redacted_before_process_finishes(self):
+        from concurrent.futures import ThreadPoolExecutor
+        import time
+        log=self.base/'live.log'
+        with ThreadPoolExecutor(1) as pool, contextlib.redirect_stdout(io.StringIO()):
+            future=pool.submit(setup.run,[sys.executable,'-c',
+                'import time; print("token=abc live progress",flush=True); time.sleep(1)'],5,log,.05)
+            deadline=time.monotonic()+.8
+            while time.monotonic()<deadline:
+                if log.exists() and 'live progress' in log.read_text():break
+                time.sleep(.02)
+            self.assertTrue(log.is_file());self.assertIn('live progress',log.read_text())
+            self.assertNotIn('token=abc',log.read_text());self.assertFalse(future.done())
+            result=future.result(timeout=3)
+        self.assertEqual(result['returncode'],0)
+    def test_log_write_failure_stops_the_child(self):
+        processes=[];real=setup.subprocess.Popen
+        def capture(*args,**kwargs):
+            child=real(*args,**kwargs);processes.append(child);return child
+        with patch.object(setup.subprocess,'Popen',capture),patch.object(setup,'atomic_text',side_effect=OSError('QA disk failure')):
+            with self.assertRaises(OSError):setup.run([sys.executable,'-c','import time; time.sleep(20)'],5,self.base/'log',.02)
+        self.assertEqual(len(processes),1);self.assertIsNotNone(processes[0].poll())
 
 
 class Project(unittest.TestCase):

@@ -82,7 +82,7 @@ def redact(value):
     return value
 
 
-def run(command, timeout):
+def run(command, timeout, log_path=None, poll_interval=15):
     """Drain output continuously; retain only a bounded, redacted tail on disk."""
     import threading
     tail = bytearray()
@@ -91,11 +91,28 @@ def run(command, timeout):
                                start_new_session=os.name != 'nt')
     def consume():
         while True:
-            chunk = process.stdout.read(4096)
+            chunk = process.stdout.read1(4096)
             if not chunk: break
             tail.extend(chunk)
             if len(tail) > MAX_OUTPUT: del tail[:-MAX_OUTPUT]
+    def snapshot():
+        output = redact(bytes(tail).decode('utf-8', errors='replace'))
+        if log_path is not None:
+            checked(log_path);atomic_text(log_path, output)
+        return output
     thread = threading.Thread(target=consume, daemon=True);thread.start()
+    def stop():
+        if process.poll() is not None: return
+        try:
+            if os.name == 'nt':
+                subprocess.run(['taskkill', '/PID', str(process.pid), '/T', '/F'], capture_output=True, timeout=15)
+            else:
+                import signal
+                try: os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError: pass
+        finally:
+            if process.poll() is None: process.kill()
+            process.wait(timeout=15)
     timed_out = False
     try:
         deadline = time.monotonic() + timeout
@@ -103,22 +120,19 @@ def run(command, timeout):
             remaining = deadline - time.monotonic()
             if remaining <= 0: raise subprocess.TimeoutExpired(command, timeout)
             try:
-                process.wait(timeout=min(15, remaining));break
+                process.wait(timeout=min(poll_interval, remaining));break
             except subprocess.TimeoutExpired:
                 if time.monotonic() >= deadline: raise
-                print('[working] subprocess is still running; step output is being captured', flush=True)
+                snapshot()
+                print('[working] subprocess is still running; bounded step log updated', flush=True)
     except subprocess.TimeoutExpired:
-        timed_out = True
-        if os.name == 'nt':
-            subprocess.run(['taskkill', '/PID', str(process.pid), '/T', '/F'], capture_output=True, timeout=15)
-        else:
-            import signal
-            os.killpg(process.pid, signal.SIGKILL)
-        process.kill();process.wait(timeout=15)
+        timed_out = True;stop()
+    except BaseException:
+        stop();raise
     finally:
         thread.join(timeout=5)
         if not thread.is_alive(): process.stdout.close()
-    output = redact(bytes(tail).decode('utf-8', errors='replace'))
+    output = snapshot()
     return dict(returncode=process.returncode, timed_out=timed_out, output=output)
 
 
@@ -186,8 +200,10 @@ def prepare(args):
             print(f'[{name}] started', flush=True)
             started = time.monotonic()
             try:
-                result = run(command, timeout)
-                log = root / f'attempt-{number:02d}-{name}.log';checked(log);atomic_text(log, result['output'])
+                log = root / f'attempt-{number:02d}-{name}.log';checked(log)
+                atomic_text(log, '')
+                result = run(command, timeout, log_path=log)
+                checked(log);atomic_text(log, result['output'])
                 if result['returncode'] != 0 or result['timed_out']:
                     raise RuntimeError(f'{name} failed; returncode={result["returncode"]}; timeout={result["timed_out"]}; see {log.name}; output tail: {result["output"][-3000:]}')
                 event.update(status='passed', observation=f'Completed in {time.monotonic()-started:.2f}s; log={log.name}')
