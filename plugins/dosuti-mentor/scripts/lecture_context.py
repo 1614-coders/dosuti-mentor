@@ -152,7 +152,7 @@ def overlaps(speech, limit=100):
     return pairs, False
 
 
-def assemble(directory, data, start, window, include_code_stages=True, include_term_notes=True):
+def assemble(directory, data, start, window, include_code_stages=True, include_term_notes=True, include_verbal_homework=True):
     number(start, 'Time')
     number(window, 'Window')
     stop = number(start + window, 'Window end')
@@ -328,7 +328,9 @@ def assemble(directory, data, start, window, include_code_stages=True, include_t
     from term_notes import checked as checked_terms
     terms = checked_terms(directory, data, start, stop) if include_term_notes else []
     if any(row['stale'] for row in terms): warnings.append('stale_term_interpretation')
-    return dict(schema_version=2, source=data['video']['source'], registered_source=deepcopy(data['video']),
+    from compact_lesson import memory_context
+    memory = memory_context(directory, start, stop, {f['id'] for f in frames})
+    result = dict(schema_version=2, source=data['video']['source'], registered_source=deepcopy(data['video']),
                 video_integrity=video_state, code_integrity=snapshot_state,
                 coverage=covered, gaps=gaps, requested_window=[start, stop],
                 sources=sources,screen_scan_sources=screen_sources, rules=[source['rules_file'] for source in sources],
@@ -337,3 +339,12 @@ def assemble(directory, data, start, window, include_code_stages=True, include_t
                 frames=frames, visual_notes=notes, warnings=warnings,
                 term_notes=terms, code_stages=stages, teacher_code=data['code'], teacher_repositories=teacher_repositories,
                 homework=data['homework'], resources=describe(data['resources']))
+    if include_verbal_homework:
+        from spoken_homework import resolve
+        result['homework'] = resolve(directory, data)
+        from course import homework_revision
+        saved_revision = (memory or {}).get('review_scope', {}).get('homework_revision')
+        if saved_revision is not None and saved_revision != homework_revision(result['homework']):
+            result['warnings'].append('lecture_memory_homework_review_is_outdated_use_current_homework')
+    if memory is not None: result['lecture_memory'] = memory
+    return result

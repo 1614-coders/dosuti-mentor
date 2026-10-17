@@ -149,7 +149,7 @@ def learn_unit(args):
     path=folder/'unit-learning.json'
     prefs=preferences(args);intent=intent_view(args)
     def selected():
-        data=study_units.load(root)
+        data=study_units.load(root,include_history=False)
         if args.unit_id not in data['units']:raise ValueError('Unknown study unit')
         return study_units.checked_units(root,data,[args.unit_id])[args.unit_id]
     incoming=assessment or checkpoint or decision

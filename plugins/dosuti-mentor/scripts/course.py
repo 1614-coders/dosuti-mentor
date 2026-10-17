@@ -73,6 +73,8 @@ def material_history(current):
 
 
 def homework_revision(homework):
+    if homework.get('status') == 'provided' and homework.get('source_kind') == 'lecture_speech':
+        return homework['revision']
     if homework.get('status') == 'provided' and homework.get('sha256'):
         return 'sha256:' + homework['sha256']
     return homework.get('status', 'not_asked')
@@ -184,7 +186,8 @@ def context(args):
         selected = select(directory, data, args.topic_id)
     else:
         selected = assemble(directory, data, args.time, args.window)
-    selected['homework']['integrity'] = homework_integrity(data['homework'])
+    data = dict(data, homework=selected['homework'])
+    selected['homework'] = dict(data['homework'], integrity=homework_integrity(data['homework']))
     selected['preferences'] = preferences(args)
     from learning_intent import view as intent_view
     selected['learning_intent'] = intent_view(args)
@@ -413,6 +416,8 @@ def download_video(directory, data, fragments=4, site_timeout=1800, quality='bes
 
 
 def checked_video(directory, data, fragments=4, site_timeout=1800, quality='best'):
+    from compact_lesson import require_media_open
+    require_media_open(directory)
     video = download_video(directory, data, fragments, site_timeout, quality)
     checksum = file_hash(video)
     expected = data['video'].get('sha256')
@@ -434,6 +439,11 @@ def prepare(args):
     from model_readiness import checked_model, ModelNotReady, repair_type
     from publication import publish_job
     directory = lesson_path(args)
+    from compact_lesson import require_media_open, receipt
+    require_media_open(directory)
+    if ((directory/'compact.json').exists() and receipt(directory)['state']=='reopened'
+            and not getattr(args,'rebuild',False)):
+        raise ValueError('Reopened compact lesson requires prepare --rebuild; retained context remains available')
     data = read(directory / 'lesson.json')
     base_key = job_key = None
     try:
@@ -571,7 +581,8 @@ def progress(args):
     directory = lesson_path(args)
     revision = getattr(args, 'homework_revision', None)
     with file_lock(directory / '.lesson.lock'):
-        homework = read(directory / 'lesson.json')['homework']
+        from spoken_homework import resolve as resolve_homework
+        homework = resolve_homework(directory, read(directory / 'lesson.json'))
         if args.stage == 'homework_passed' and not revision:
             raise ValueError('homework_passed requires --homework-revision from the reviewed task')
         if revision is not None:
@@ -642,8 +653,10 @@ def status(args):
     from material_sources import describe
     from download_diagnostics import describe as download_status
     for lesson in lessons:
-        lesson['resources']=describe(lesson['resources'])
         slug(lesson['id'])
+        from spoken_homework import resolve as resolve_homework
+        lesson['homework'] = resolve_homework(root(args)/'lessons'/lesson['id'], lesson)
+        lesson['resources']=describe(lesson['resources'])
         lesson['download_diagnostics']=download_status(root(args)/'lessons'/lesson['id'],lesson['video'])
     with db(args) as connection:
         states = visible_progress(connection.execute('SELECT * FROM progress ORDER BY updated'),
@@ -679,7 +692,7 @@ def make_portable(args):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest='command', required=True)
-    for name in ['init', 'add-lesson', 'attach', 'prepare', 'progress', 'bind', 'status', 'context', 'frame', 'scan-screen', 'diff-code', 'history', 'make-portable', 'settings', 'resume', 'topic', 'search', 'project-map', 'resource', 'code-stage', 'term-note', 'storage-report', 'download-plan', 'doctor', 'cleanup-plan', 'cleanup-job', 'fragments', 'intent', 'unit', 'learn-unit', 'research', 'project-timeline', 'study-next', 'career', 'career-route', 'ocr-frame']:
+    for name in ['init', 'add-lesson', 'attach', 'prepare', 'progress', 'bind', 'status', 'context', 'frame', 'scan-screen', 'diff-code', 'history', 'make-portable', 'settings', 'resume', 'topic', 'search', 'project-map', 'resource', 'code-stage', 'term-note', 'storage-report', 'download-plan', 'doctor', 'cleanup-plan', 'cleanup-job', 'fragments', 'intent', 'unit', 'learn-unit', 'research', 'project-timeline', 'study-next', 'career', 'career-route', 'ocr-frame', 'compact', 'spoken-homework']:
         command = commands.add_parser(name)
         command.add_argument('--course', type=Path, required=True)
         if name in ['status', 'progress', 'bind', 'context', 'history', 'settings', 'resume', 'intent', 'learn-unit', 'study-next', 'career-route']:
@@ -688,11 +701,21 @@ def main():
             command.add_argument('--session',help='Stable ID for this learning session/chat task')
         if name in ['status', 'context', 'settings', 'learn-unit']:
             command.add_argument('--profiles-dir', type=Path, help='Optional shared personal preferences directory outside plugin')
-        if name in ['attach', 'prepare', 'progress', 'bind', 'add-lesson', 'context', 'frame', 'scan-screen', 'diff-code', 'history', 'topic', 'resource', 'code-stage', 'term-note', 'fragments', 'ocr-frame']:
+        if name in ['attach', 'prepare', 'progress', 'bind', 'add-lesson', 'context', 'frame', 'scan-screen', 'diff-code', 'history', 'topic', 'resource', 'code-stage', 'term-note', 'fragments', 'ocr-frame', 'compact', 'spoken-homework']:
             command.add_argument('--lesson', required=True)
         if name in ['init', 'add-lesson']:
             command.add_argument('--title', required=True)
-        if name == 'career-route':
+        if name == 'spoken-homework':
+            command.add_argument('action', choices=['draft','accept','status'])
+            command.add_argument('--time', type=float, default=0)
+            command.add_argument('--window', type=float, default=90)
+            command.add_argument('--assignment-file', type=Path)
+            command.add_argument('--expected-revision', type=int)
+        elif name == 'compact':
+            command.add_argument('action',choices=['draft','plan','apply','status','reopen'])
+            command.add_argument('--memory-file',type=Path)
+            command.add_argument('--plan-file',type=Path)
+        elif name == 'career-route':
             command.add_argument('--route-file',type=Path)
             command.add_argument('--expected-revision',type=int)
             command.add_argument('--reason')
@@ -837,7 +860,14 @@ def main():
             command.add_argument('--file')
     args = parser.parse_args()
     try:
-        if args.command=='ocr-frame':
+        if args.command == 'spoken-homework':
+            from spoken_homework import dispatch
+            print(json.dumps(dispatch(args), ensure_ascii=False, indent=2))
+            return
+        if args.command=='compact':
+            from compact_lesson import dispatch
+            print(json.dumps(dispatch(args),ensure_ascii=False,indent=2))
+        elif args.command=='ocr-frame':
             from screen_ocr import view
             print(json.dumps(view(args),ensure_ascii=False,indent=2))
         elif args.command=='career-route':

@@ -83,24 +83,34 @@ def validate_record(row):
     if digest(semantic(row))!=row['content_sha256']:raise ValueError('Unit annotation checksum changed')
 
 
-def load(root):
+def validate_history(event):
+    if not isinstance(event,dict) or set(event)!={'unit','record','at'}:raise ValueError('Invalid unit history')
+    validate_record(event['record'])
+    if event['unit']!=event['record']['id'] or not isinstance(event['at'],str) or not event['at']:
+        raise ValueError('Invalid historical unit identity')
+
+
+def load(root,include_history=True):
     from learning_tools import read_json
     path=root/'study-units.json';checked(path)
     from document_store import read
-    data=read(path,dict(schema=SCHEMA,revision=0,units={},history=[]),'study_units')
+    history_count=0
+    def projection(chunks):
+        nonlocal history_count
+        from json_projection import visit_array_chunks
+        result,history_count=visit_array_chunks(chunks,'history',validate_history)
+        return result
+    data=read(path,dict(schema=SCHEMA,revision=0,units={},history=[]),'study_units',
+              project=None if include_history else projection)
     if (set(data)!={'schema','revision','units','history'} or data['schema']!=SCHEMA
             or type(data['revision']) is not int or data['revision']<0 or not isinstance(data['units'],dict)
             or len(data['units'])>MAX_UNITS or not isinstance(data['history'],list)
-            or data['revision']!=len(data['units'])+len(data['history'])):
+            or data['revision']!=len(data['units'])+(len(data['history']) if include_history else history_count)):
         raise ValueError('Invalid study units registry')
     for name,row in data['units'].items():
         validate_record(row)
         if name!=row['id']:raise ValueError('Invalid unit identity')
-    for event in data['history']:
-        if not isinstance(event,dict) or set(event)!={'unit','record','at'}:raise ValueError('Invalid unit history')
-        validate_record(event['record'])
-        if event['unit']!=event['record']['id'] or not isinstance(event['at'],str) or not event['at']:
-            raise ValueError('Invalid historical unit identity')
+    for event in data['history']:validate_history(event)
     graph(data['units'])
     return data
 

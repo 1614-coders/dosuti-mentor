@@ -1,10 +1,12 @@
 """Bounded content-addressed documents; legacy JSON is read without migration.
 
 The caller holds its existing write lock. Parts are published before the atomic
-manifest. Full logical documents are still decoded in memory; this is not an index.
+manifest. Default reads decode full logical documents; an opt-in projector consumes verified
+parts without assembling the full text. This is not an index.
 """
 import hashlib
 import json
+import codecs
 from pathlib import Path
 from atomic_files import atomic_json
 from profile_storage import checked
@@ -21,28 +23,51 @@ def encoded(value):return json.dumps(value,ensure_ascii=False,indent=2,allow_nan
 def folder(path):return path.with_name(path.stem+'-objects')
 
 
-def read(path,default,kind):
+def read(path,default,kind,project=None):
     from learning_tools import read_json
     checked(path);value=read_json(path,default)
-    if not isinstance(value,dict) or value.get('schema')!=SCHEMA:return value
+    if not isinstance(value,dict) or value.get('schema')!=SCHEMA:
+        # Inline documents are already bounded by read_json. Projection mainly
+        # saves memory for large segmented registries; no on-disk migration.
+        return project(iter([encoded(value).decode('utf-8')])) if project else value
     if (set(value)!={'schema','kind','bytes','sha256','parts'} or value['kind']!=kind
             or type(value['bytes']) is not int or not 0<value['bytes']<=MAX_BYTES
             or not isinstance(value['parts'],list) or not 1<=len(value['parts'])<=256):
         raise ValueError('Invalid document manifest')
     from source_integrity import digest
     digest(value['sha256']);directory=folder(path);checked(directory,True)
-    data=bytearray()
+    # Validate the declared total before decoding any bounded parts.
+    total=0
     for item in value['parts']:
         if not isinstance(item,dict) or set(item)!={'sha256','bytes'} or type(item['bytes']) is not int or not 0<item['bytes']<=PART_BYTES:
             raise ValueError('Invalid document part')
-        digest(item['sha256']);p=directory/(item['sha256']+'.part');checked(p)
+        digest(item['sha256']);total+=item['bytes']
+    if total!=value['bytes']:raise ValueError('Document size changed')
+    decoder=codecs.getincrementaldecoder('utf-8')();chunks=[];checksum=hashlib.sha256()
+    for item in value['parts']:
+        p=directory/(item['sha256']+'.part');checked(p)
         if not p.is_file() or p.stat().st_size!=item['bytes']:raise ValueError('Document part missing or size changed')
         with p.open('rb') as stream:raw=stream.read(PART_BYTES+1)
         if len(raw)!=item['bytes'] or hashlib.sha256(raw).hexdigest()!=item['sha256']:raise ValueError('Document part checksum changed')
-        data.extend(raw)
-        if len(data)>value['bytes']:raise ValueError('Document size changed')
-    if len(data)!=value['bytes'] or hashlib.sha256(data).hexdigest()!=value['sha256']:raise ValueError('Document checksum changed')
-    result=json.loads(data.decode('utf-8'))
+        checksum.update(raw);chunks.append(raw if project else decoder.decode(raw))
+    if checksum.hexdigest()!=value['sha256']:raise ValueError('Document checksum changed')
+    if project:
+        # Keep verified bytes only. Consume/release them while projecting; no
+        # full logical text or historical object graph is assembled.
+        from collections import deque
+        pending=deque(chunks);del chunks,raw
+        def texts():
+            while pending:yield decoder.decode(pending.popleft())
+            yield decoder.decode(b'',final=True)
+        result=project(texts())
+        if not isinstance(result,dict) or result.get('schema')==SCHEMA:raise ValueError('Invalid logical document')
+        return result
+    chunks.append(decoder.decode(b'',final=True))
+    del raw,decoder
+    text=''.join(chunks)
+    # json.loads constructs a second object graph; release chunks before that peak.
+    del chunks
+    result=json.loads(text)
     if not isinstance(result,dict) or result.get('schema')==SCHEMA:raise ValueError('Invalid logical document')
     return result
 

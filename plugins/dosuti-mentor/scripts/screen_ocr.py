@@ -113,22 +113,34 @@ def view(args):
         save(args,directory,key)
     if value is None and getattr(args,'run',False):
         if course_root_inside_plugin(args):raise ValueError('OCR cache must stay outside plugin')
-        image=Path(frame['absolute_path']);checked(image)
-        if image.stat().st_size>20*1024*1024:raise ValueError('OCR image exceeds20MiB')
-        with image.open('rb') as stream:raw=stream.read(20*1024*1024+1)
-        if len(raw)>20*1024*1024 or hashlib.sha256(raw).hexdigest()!=binding['frame_sha256']:raise ValueError('OCR frame changed before recognition')
-        lines=recognize(raw,roi)
-        if select(args)[2]!=binding:raise ValueError('OCR source selection changed during recognition')
-        content=dict(schema=SCHEMA,binding=binding,region=roi,engine=identity,lines=lines,verification='ocr_candidate_only')
-        candidate=dict(content,sha256=signature(content))
-        if len(json.dumps(candidate,ensure_ascii=False,indent=2,allow_nan=False).encode())>MAX_OUTPUT:raise ValueError('OCR output exceeds cache limit')
-        for p in (directory/'evidence',folder):p.mkdir(exist_ok=True);checked(p,True)
-        lock=folder/(key+'.lock');checked(lock)
-        with file_lock(lock):
-            checked(lock);checked(path)
-            if select(args)[2]!=binding:raise ValueError('OCR source changed before save')
+        # Lock the request before expensive recognition, not just publication.
+        # This path keeps failed runs free of candidate directories and is stable
+        # across processes. Never remove or replace lock files while in use.
+        request_lock=directory/('.ocr-'+key+'.lock');checked(request_lock)
+        with file_lock(request_lock,timeout=220):
+            checked(request_lock)
+            if select(args)[2]!=binding:raise ValueError('OCR source changed while waiting')
+            if engine()!=identity:raise ValueError('OCR engine changed while waiting')
             value=cached()
-            if value is None:atomic_json(path,candidate);value=candidate
+            if value is None:
+                image=Path(frame['absolute_path']);checked(image)
+                if image.stat().st_size>20*1024*1024:raise ValueError('OCR image exceeds20MiB')
+                with image.open('rb') as stream:raw=stream.read(20*1024*1024+1)
+                if len(raw)>20*1024*1024 or hashlib.sha256(raw).hexdigest()!=binding['frame_sha256']:raise ValueError('OCR frame changed before recognition')
+                lines=observations(recognize(raw,roi))
+                if engine()!=identity:raise ValueError('OCR engine changed during recognition')
+                if select(args)[2]!=binding:raise ValueError('OCR source selection changed during recognition')
+                content=dict(schema=SCHEMA,binding=binding,region=roi,engine=identity,lines=lines,verification='ocr_candidate_only')
+                candidate=dict(content,sha256=signature(content))
+                if len(json.dumps(candidate,ensure_ascii=False,indent=2,allow_nan=False).encode())>MAX_OUTPUT:raise ValueError('OCR output exceeds cache limit')
+                for p in (directory/'evidence',folder):p.mkdir(exist_ok=True);checked(p,True)
+                lock=folder/(key+'.lock');checked(lock)
+                with file_lock(lock):
+                    checked(lock);checked(path)
+                    if select(args)[2]!=binding:raise ValueError('OCR source changed before save')
+                    if engine()!=identity:raise ValueError('OCR engine changed before save')
+                    value=cached()
+                    if value is None:atomic_json(path,candidate);value=candidate
     from ocr_review import view as review_view
     review=review_view(directory,key,value) if value else dict(revision=0,latest=None)
     return dict(review=review,review_id=key if value else None,status='candidate' if value else 'not_prepared',binding=binding,source_frame=frame['absolute_path'],

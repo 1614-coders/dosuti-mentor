@@ -91,9 +91,11 @@ def collect(directory, data, chosen):
             from ocr_review import dependency
             for name in names:values[name]=dependency(directory,name)
         elif kind == 'homework':
-            if course.homework_integrity(data.get('homework', {})) != 'verified':
+            from spoken_homework import resolve
+            homework = resolve(directory, data)
+            if course.homework_integrity(homework) != 'verified':
                 raise ValueError('Homework dependency is missing or changed')
-            values['task'] = checksum(dict(revision=course.homework_revision(data['homework'])))
+            values['task'] = checksum(dict(revision=course.homework_revision(homework)))
         else:
             from lecture_context import load_fragment, assemble
             fragments = data.get('prepared_fragments', [])

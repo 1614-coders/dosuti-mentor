@@ -1,11 +1,37 @@
-# Проверки версии 0.4.32
+# Проверки версии 0.4.39
 
 Локальная среда: macOS arm64, Python3.12.
 
-- 752 automated tests / 21.167s / OK.
-- 10 skill definitions validated; relative skill references exist.
-- 152 installed plugin files matched source, excluding pycache/pyc.
-- 4 installed CLI checks: old pilot status/export, new pilot start/export.
+- 841 automated tests; 15 regressions for compact full-lecture QA findings.
+- Full6501.74s lecture on an isolated copy: 38windows,2444ASR,651frames preserved.
+- Source lesson unchanged;0learner attempts created;2session checkpoints/journal preserved.
+- Reviewed verbal homework works after v1 compaction without rewriting sealed lesson files.
+- Narrow windows withhold unscoped topic prose and late code; full-topic access preserved.
+- Structured v2 review scope; v1 explicitly unknown; no invented audio verification.
+- Homework origin/text/revision corruption, stale grades, CAS, priority, relocation,
+  dependencies/unit provenance and changed compact plans covered.
+- 11skills validated;171installed plugin files match source;6fresh installed CLI checks.
+
+Это техническая самопроверка. Качество всего ASR/каждого символа кода и личная
+пригодность объяснений не доказаны. Семантическая выборка:23/651кадра (6крупно),
+весь сохранённый ASR/текущий код; независимой аудиопроверки нет.
+Windows и независимый внешний пилот остаются открытыми.
+
+## История предыдущих проверок
+
+### Версия 0.4.38
+
+Локальная среда: macOS arm64, Python3.12.
+
+- 826 automated tests / 21.953s / OK.
+- 11 skill definitions validated; relative skill references exist.
+- 168 installed plugin files matched source; 5 compact/context CLI checks passed on isolated real-media copy.
+- Installed cleanup plan/apply/plan on isolated synthetic cache: old build removed, current build and lock inode preserved.
+- Actual host plan: absent, no real-host deletion.
+- Prior0.4.34 reader checks: old-writer inline/segmented documents match logical content, no writes.
+- Document-read benchmark: 3 cases, 3 fresh-process runs per implementation; Python peak allocation down26–41%, not RSS; full document still restored.
+- Prior0.4.33 check —4real OS processes: 1 synthetic OCR call, 4 identical results; this does not measure recognition accuracy.
+- Invalid observations rejected before publication; failure retry, changed engine/source, lock refusal tested.
 - Old pilot journal preserved byte-for-byte by read/export.
 - Legacy connection read/update, new-name priority, old QA schema covered by tests.
 
@@ -16,3 +42,27 @@
 
 Для внешнего пилота использовать $test-learning и отдельный курс.
 При сбое до запуска заполнить TEST_REPORT_TEMPLATE.md вручную.
+
+0.4.35:14new cleanup tests; active/current/changed/unknown/linked entries preserved,
+interrupted pruning resumed, Windows unsupported without host mutation.
+Real OS-process lock acceptance used synthetic executable bytes, never executed.
+
+0.4.36:11new document-report tests; segmented/inline compatibility, orphan candidates,
+unknown/linked entries, integrity failures, scan/sample limits and observed changes.
+Report supports no deletion and makes no logical teaching/content correctness claim.
+
+0.4.37:14new registry-projection/parser tests; all historical semantic hashes and
+current bytes verified, global revision/DAG retained, sessions/answers unchanged.
+Two synthetic registries2.96/8.80MB,3fresh-process runs per mode: Python peak
+allocation down31–45%, time about6% slower. Not RSS, not a speedup claim.
+Installed QA: two session checkpoints, source damage invalidation, historical
+corruption refusal. Every CLI read preserved fixture bytes. Real courses untouched.
+
+
+0.4.38:20compact-mode tests; retained evidence/text/code/progress, managed-download
+and audio deletion, external-original protection, interrupted resume, changed assets,
+active locks, cross-lesson references, relocation, video-unit attempt/checkpoint.
+Real-media smoke:24.16s imported evidence, actual24.123s clip,3frames/2ASR segments,
+local ffmpeg extraction.5fresh installed CLI commands, no ASR rerun or network.
+Deleted2286310logical bytes only in a disposable QA copy; original files unchanged.
+QA review flags do not establish semantic completeness or teaching quality.

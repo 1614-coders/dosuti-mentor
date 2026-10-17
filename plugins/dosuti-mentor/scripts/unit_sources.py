@@ -29,7 +29,14 @@ def validate(source,stored=False):
         fields.add('resource_id');course.slug(source.get('resource_id'))
         if stored:fields|={'revision','review_sha256'};digest(source.get('review_sha256'))
     elif kind=='homework':
-        if stored:fields.add('sha256');digest(source.get('sha256'))
+        if stored:
+            fields.add('sha256');digest(source.get('sha256'))
+            if 'homework_revision' in source:
+                fields.add('homework_revision')
+                revision=source['homework_revision']
+                if not isinstance(revision,str) or not revision.startswith(('sha256:','verbal:')):
+                    raise ValueError('Invalid homework source revision')
+                digest(revision.split(':',1)[1])
     else:raise ValueError('Unknown structured unit source')
     if set(source)!=fields:raise ValueError('Invalid '+kind+' source fields')
     course.slug(source['lesson'])
@@ -103,12 +110,18 @@ def evidence(root,source,writing=False):
         context.update(resource_id=source['resource_id'],revision=value['revision'],review=item['review'],
                        origin=item['source'],text=excerpt(Path(item['extracted_file']),source,item['text_sha256']))
     else:
-        homework=data.get('homework',{})
+        from spoken_homework import resolve
+        homework=resolve(directory,data)
         if course.homework_integrity(homework)!='verified':raise ValueError('Homework missing or changed')
         value['sha256']=homework['sha256']
+        if writing or 'homework_revision' in source:
+            value['homework_revision']=course.homework_revision(homework)
+        if homework.get('source_kind') == 'lecture_speech':
+            context.update(source_kind='lecture_speech', origin=homework['origin'],
+                           uncertainties=homework['uncertainties'], assurance=homework['assurance'])
         context.update(sha256=homework['sha256'],text=excerpt(Path(homework['file']),source,homework['sha256']))
     if not writing:
         generated={'code':('code_sha256','file_sha256','stage_sha256') if 'stage' in source else ('code_sha256','file_sha256'),
-                   'resource':('revision','review_sha256'),'homework':('sha256',)}[kind]
+                   'resource':('revision','review_sha256'),'homework':('sha256','homework_revision') if 'homework_revision' in source else ('sha256',)}[kind]
         if any(value[key]!=source[key] for key in generated):raise ValueError(kind+' source revision changed')
     return value,context

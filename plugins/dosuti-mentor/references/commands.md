@@ -564,3 +564,5 @@ prompt и ключ работы; изменение файла создаёт д
 Для явной истории проекта между занятиями (current/pinned, несколько линий,
 пробелы и наблюдаемые изменения) читай [project-timeline.md](project-timeline.md).
 Старая project-map сохраняет прежнюю семантику.
+
+Для draft/plan/apply компактного режима используй [compact-lecture.md](compact-lecture.md).
