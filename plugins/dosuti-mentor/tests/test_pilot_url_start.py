@@ -39,6 +39,10 @@ class URLStart(unittest.TestCase):
         data=course.read(Path(source['course'])/'lessons'/source['lesson']/'lesson.json')
         self.assertEqual(data['video']['source'],self.f.args.video)
         self.assertEqual(data['video']['sha256'],source['sha256'])
+        from preparation_status import describe
+        status=describe(Path(source['course'])/'lessons'/source['lesson'])
+        self.assertEqual(status['stage'],'video_ready')
+        self.assertFalse(status['teaching_ready'])
         self.assertTrue(path.is_relative_to(self.f.root/'run/course'))
         self.f.prepare();again=self.read_source()
         self.assertEqual(again,source);self.assertEqual(self.fetch.call_count,1)

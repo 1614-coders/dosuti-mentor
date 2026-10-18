@@ -80,6 +80,10 @@ class ContextRegression(unittest.TestCase):
         folder = self.add('loop', 0, 60, [(i * 3, i * 3 + 3, 'Ничего.') for i in range(15)])
         result = self.context(0, 60)
         self.assertIn('asr_mass_repetition_requires_review', result['warnings'])
+        summary=result['quality_summary']
+        self.assertEqual(summary['audio']['status'],'requires_review')
+        self.assertIn('asr_mass_repetition_requires_review',summary['audio']['fragments'][0]['warnings'])
+        self.assertFalse(summary['meaning_verified'])
         self.assertIn('asr_mass_repetition_requires_review', (folder / 'tutor_context.md').read_text())
 
     def test_legacy_packet_is_diagnosed_without_rewriting(self):

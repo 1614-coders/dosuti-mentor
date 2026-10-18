@@ -349,4 +349,6 @@ def assemble(directory, data, start, window, include_code_stages=True, include_t
         if saved_revision is not None and saved_revision != homework_revision(result['homework']):
             result['warnings'].append('lecture_memory_homework_review_is_outdated_use_current_homework')
     if memory is not None: result['lecture_memory'] = memory
+    from material_quality import summarize
+    result['quality_summary'] = summarize(result)
     return result

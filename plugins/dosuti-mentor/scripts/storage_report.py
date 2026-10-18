@@ -21,7 +21,7 @@ def group(parts):
     return None,'course_metadata_or_other'
 
 
-def inventory(root, max_entries=200000):
+def inventory(root, max_entries=200000, *, prefix=()):
     if type(max_entries) is not int or not 1<=max_entries<=1000000:
         raise ValueError('max-entries must be an integer from 1 to 1000000')
     root=Path(root).expanduser().resolve()
@@ -48,7 +48,7 @@ def inventory(root, max_entries=200000):
                         if stat.S_ISLNK(info.st_mode):links+=1;continue
                         if stat.S_ISDIR(info.st_mode):stack.append(path);continue
                         if not stat.S_ISREG(info.st_mode):special+=1;continue
-                        relative=path.relative_to(root);key=group(relative.parts)
+                        relative=path.relative_to(root);key=group(prefix + relative.parts)
                         if len(relative.parts)==3 and relative.parts[0]=='learners' and re.fullmatch(r'unit-learning\.json\.[0-9a-f]{32}\.tmp',relative.name):
                             recovery_files+=1;recovery_bytes+=info.st_size
                         row=groups.setdefault(key,dict(lesson=key[0],category=key[1],files=0,logical_bytes=0))

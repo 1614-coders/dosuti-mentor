@@ -191,8 +191,14 @@ def video_worker(root, source, output, offline=False):
         course.add_lesson(SimpleNamespace(course=folder,lesson=lesson,title='Первая лекция',video=source,order=1))
     data=course.read(directory/'lesson.json')
     if data['video']['source']!=source: raise ValueError('Registered source differs; preserve the course')
+    from preparation_status import tracked, phase
+    @tracked(complete_stage='video_ready')
+    def receive(args):
+        result=course.checked_video(directory,data,offline=offline)
+        phase('video_ready',source_sha256=result[1])
+        return result
     with course_scope(folder,'prepare'):
-        video,checksum=course.checked_video(directory,data,offline=offline)
+        video,checksum=receive(SimpleNamespace(course=folder,lesson=lesson))
     atomic_json(output,dict(path=str(video),sha256=checksum,lesson=lesson,course=str(folder)))
 
 

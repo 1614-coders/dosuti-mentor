@@ -5,6 +5,27 @@ import re
 import subprocess
 from atomic_files import atomic_json
 from source_integrity import file_hash
+from preparation_control import run as preparation_run
+
+
+def preflight(url, folder):
+    """HEAD is advisory: unsupported/missing metadata must not block valid sources."""
+    import tempfile
+    from download_space import ensure
+    size = None
+    with tempfile.TemporaryDirectory(dir=folder) as temporary:
+        headers = Path(temporary) / 'head'
+        try:
+            result = preparation_run(['curl', '--head', '--location', '--fail', '--silent', '--show-error',
+                '--connect-timeout', '10', '--max-time', '20', '--proto', '=http,https',
+                '--proto-redir', '=http,https', '--dump-header', str(headers), '--output', str(Path(temporary) / 'body'), '--', url],
+                capture_output=True, timeout=25)
+            status, values = response_headers(headers)
+            if result.returncode == 0 and status == 200:
+                size = int(values.get('content-length', '0')) or None
+        except (OSError, ValueError, subprocess.TimeoutExpired):
+            pass
+    ensure(folder, size)
 
 
 def response_headers(path):
@@ -29,7 +50,7 @@ def response_headers(path):
     return status, headers
 
 
-def download(url, target, duration=1800):
+def download(url, target, duration=1800, *, known_size=None):
     target = Path(target)
     part = target.with_name(target.name+'.part')
     receipt = target.with_name(target.name+'.resume.json')
@@ -52,13 +73,22 @@ def download(url, target, duration=1800):
     if state is None:
         part.unlink(missing_ok=True); receipt.unlink(missing_ok=True)
     offset = state['size'] if state else 0
+    if state:
+        from download_space import ensure
+        # Body plus append copy can coexist during a validated range transfer.
+        ensure(target.parent, state['total'] - offset, merge=True)
+    elif known_size is not None:
+        from download_space import ensure
+        ensure(target.parent, known_size)
+    else:
+        preflight(url, target.parent)
     cmd = ['curl', '--location', '--fail', '--connect-timeout', '20', '--max-time', str(duration),
            '--proto', '=http,https', '--proto-redir', '=http,https', '--silent', '--show-error',
            '--header', 'Accept-Encoding: identity', '--dump-header', str(headers), '--output', str(body)]
     if state:
         cmd += ['--range', f'{offset}-', '--header', 'If-Range: '+state['etag']]
     try:
-        result = subprocess.run(cmd+['--', url], capture_output=True, timeout=duration+30)
+        result = preparation_run(cmd+['--', url], capture_output=True, timeout=duration+30)
         status, values = response_headers(headers)
         if status not in (200, 206):
             raise ValueError(f'HTTP {status}: video was not downloaded; partial download was not appended')

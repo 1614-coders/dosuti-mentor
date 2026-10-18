@@ -15,6 +15,8 @@ import uuid
 import zipfile
 from storage_lock import file_lock
 from managed_storage import managed_operation, find_home, session
+from preparation_status import tracked, phase
+from preparation_control import run as preparation_run
 from storage_paths import source_kind, local_path, anchored, resolved
 from source_integrity import (digest, source_matches, verify_evidence, check_local_video,
                               seal_snapshot, verify_snapshot)
@@ -442,6 +444,7 @@ def checked_video(directory, data, fragments=4, site_timeout=1800, quality='best
 
 
 @managed_operation
+@tracked
 def prepare(args):
     from model_readiness import checked_model, ModelNotReady, repair_type
     from publication import publish_job
@@ -455,14 +458,17 @@ def prepare(args):
     base_key = job_key = None
     try:
         if args.import_prepared:
+            phase('publish')
             source = args.import_prepared.resolve()
             imported_manifest = read(source / 'manifest.json')
             if not isinstance(imported_manifest, dict):
                 raise ValueError('Imported manifest must be an object')
             digest(imported_manifest.get('source_sha256'), 'Imported source SHA256')
             if not data['video'].get('sha256'):
+                phase('download')
                 checked_video(directory, data, getattr(args,'download_fragments',4), getattr(args,'site_timeout',1800), getattr(args,'video_quality','best'))
                 data = read(directory / 'lesson.json')
+                phase('publish')
             check_local_video(data['video'])
             source_matches(imported_manifest, data['video']['sha256'])
             verify_evidence(source, imported_manifest)
@@ -487,12 +493,13 @@ def prepare(args):
             if duration <= 0:
                 raise ValueError('Fragment duration must be positive')
             home = find_home(root(args))
+            phase('model_install', source_sha256=checksum, actual_duration=duration)
             models = home / 'models' if home else root(args) / '.runtime/models'
             model_path = args.model_path.resolve() if args.model_path else models / args.model
             try:
                 model_info = checked_model(model_path)
             except ModelNotReady:
-                subprocess.run([sys.executable, str(SCRIPT_DIR / 'download_model.py'), repair_type(model_path, args.model),
+                preparation_run([sys.executable, str(SCRIPT_DIR / 'download_model.py'), repair_type(model_path, args.model),
                                 '--output', str(model_path)], check=True)
                 model_info = checked_model(model_path)
             settings = dict(source_sha256=checksum, start=float(args.start), duration=float(duration),
@@ -523,10 +530,13 @@ def prepare(args):
             command += ['--resume']
             recent = read(directory / 'lesson.json')
             if (working / 'payload-cleaned.json').exists():
+                phase('publish')
                 from job_cleanup import cleaned_publication
                 target = cleaned_publication(working, directory, recent, job_key)
             else:
-                subprocess.run(command, check=True)
+                phase('worker', worker_key=job_key)
+                preparation_run(command, check=True)
+                phase('publish')
                 recent = read(directory / 'lesson.json')
                 matching = [f for f in recent.get('retired_fragments', []) + recent['prepared_fragments']
                             if f.get('job_key') == job_key]
@@ -575,13 +585,14 @@ def prepare(args):
                    'Prepared candidate; explicit selection preserved:' if deferred else
                    'Superseded job saved but not activated:')
         print(message, target)
-    except Exception as error:
+    except (Exception, KeyboardInterrupt) as error:
         def failed(latest):
             if job_key is not None:
                 current=latest.get('processing_jobs',{}).get(base_key,{})
                 if current.get('job_key') != job_key:
                     return
-                current.update(status='failed',error=type(error).__name__ + ': ' + str(error)[:300])
+                current.update(status='interrupted' if isinstance(error, KeyboardInterrupt) else 'failed',
+                               error=type(error).__name__ + ': ' + str(error)[:300])
             latest['last_processing_error']=type(error).__name__ + ': ' + str(error)[:300]
         update_lesson(directory,failed)
         raise
@@ -654,6 +665,16 @@ def diff_code(args):
     print(json.dumps(result, ensure_ascii=False, indent=2))
 
 
+def preparation_status(args):
+    from preparation_status import describe
+    print(json.dumps(describe(lesson_path(args)), ensure_ascii=False, indent=2))
+
+
+def preparation_step(args):
+    from preparation_status import record
+    print(json.dumps(record(args), ensure_ascii=False, indent=2))
+
+
 def status(args):
     from learning_tools import preferences, cursor
     from learning_intent import view as intent_view
@@ -670,6 +691,8 @@ def status(args):
         lesson['resources']=describe(lesson['resources'])
         lesson['download_diagnostics']=download_status(root(args)/'lessons'/lesson['id'],lesson['video'])
         directory = root(args) / 'lessons' / lesson['id']
+        from preparation_status import describe as preparation_view
+        lesson['preparation_status'] = preparation_view(directory)
         for job in lesson.get('processing_jobs', {}).values():
             working = directory / '.jobs' / slug(job['job_key'])
             job['processing_status'] = (processing_status(working)
@@ -708,7 +731,7 @@ def make_portable(args):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest='command', required=True)
-    for name in ['init', 'add-lesson', 'attach', 'prepare', 'progress', 'bind', 'status', 'context', 'frame', 'scan-screen', 'diff-code', 'history', 'make-portable', 'settings', 'resume', 'topic', 'search', 'project-map', 'resource', 'code-stage', 'term-note', 'storage-report', 'download-plan', 'doctor', 'cleanup-plan', 'cleanup-progress', 'cleanup-job', 'fragments', 'intent', 'unit', 'learn-unit', 'research', 'project-timeline', 'study-next', 'career', 'career-route', 'ocr-frame', 'compact', 'spoken-homework']:
+    for name in ['init', 'add-lesson', 'attach', 'prepare', 'progress', 'bind', 'status', 'context', 'frame', 'scan-screen', 'diff-code', 'history', 'make-portable', 'settings', 'resume', 'topic', 'search', 'project-map', 'resource', 'code-stage', 'term-note', 'storage-report', 'download-plan', 'doctor', 'cleanup-plan', 'cleanup-progress', 'cleanup-job', 'fragments', 'intent', 'unit', 'learn-unit', 'research', 'project-timeline', 'study-next', 'career', 'career-route', 'ocr-frame', 'compact', 'spoken-homework', 'preparation-status', 'preparation-step', 'preparation-cancel', 'preparation-summary']:
         command = commands.add_parser(name)
         command.add_argument('--course', type=Path, required=True)
         if name in ['status', 'progress', 'bind', 'context', 'history', 'settings', 'resume', 'intent', 'learn-unit', 'study-next', 'career-route', 'cleanup-progress']:
@@ -717,8 +740,10 @@ def main():
             command.add_argument('--session',help='Stable ID for this learning session/chat task')
         if name in ['status', 'context', 'settings', 'learn-unit']:
             command.add_argument('--profiles-dir', type=Path, help='Optional shared personal preferences directory outside plugin')
-        if name in ['attach', 'prepare', 'progress', 'bind', 'add-lesson', 'context', 'frame', 'scan-screen', 'diff-code', 'history', 'topic', 'resource', 'code-stage', 'term-note', 'fragments', 'ocr-frame', 'compact', 'spoken-homework']:
+        if name in ['attach', 'prepare', 'progress', 'bind', 'add-lesson', 'context', 'frame', 'scan-screen', 'diff-code', 'history', 'topic', 'resource', 'code-stage', 'term-note', 'fragments', 'ocr-frame', 'compact', 'spoken-homework', 'preparation-status', 'preparation-step', 'preparation-cancel', 'preparation-summary']:
             command.add_argument('--lesson', required=True)
+        if name == 'preparation-cancel':
+            command.add_argument('--attempt', required=True, help='Exact attempt_id from preparation-status')
         if name in ['init', 'add-lesson']:
             command.add_argument('--title', required=True)
         if name == 'spoken-homework':
@@ -859,6 +884,10 @@ def main():
             command.add_argument('--window',type=float,default=120)
             command.add_argument('--region',type=float,nargs=4)
             command.add_argument('--run',action='store_true',help='Run optional local OCR; otherwise read cache only')
+        elif name == 'preparation-step':
+            command.add_argument('--step', choices=['frames_review','code_review','ready'], required=True)
+            command.add_argument('--time', type=float, required=True)
+            command.add_argument('--window', type=float, required=True)
         elif name == 'scan-screen':
             command.add_argument('--start',type=float,default=0)
             command.add_argument('--duration',type=float,default=120)
@@ -880,10 +909,25 @@ def main():
             command.add_argument('--file')
     args = parser.parse_args()
     try:
+        if args.command in ('preparation-status', 'preparation-cancel'):
+            # Observe a live QA operation without taking its exclusive use lock
+            # or creating a managed runtime/temp session.
+            from pilot_lifecycle import active
+            directory = root(args)
+            if directory.name == 'course': active(directory.parent)
+            if args.command == 'preparation-status': preparation_status(args)
+            else:
+                from preparation_status import cancel
+                print(json.dumps(cancel(args), ensure_ascii=False, indent=2))
+            return
         from pilot_activity import course_scope
         scope = getattr(args, 'course', None)
         home = find_home(scope) if scope is not None and args.command != 'prepare' else None
         with course_scope(scope, args.command), session(home):
+            if args.command == 'preparation-summary':
+                from preparation_summary import summarize
+                print(json.dumps(summarize(lesson_path(args)), ensure_ascii=False, indent=2))
+                return
             if args.command == 'spoken-homework':
                 from spoken_homework import dispatch
                 print(json.dumps(dispatch(args), ensure_ascii=False, indent=2))
@@ -947,6 +991,9 @@ def main():
                 print(json.dumps(getattr(learning_tools,args.command.replace('-','_'))(args),ensure_ascii=False,indent=2))
             else:
                 globals()[args.command.replace('-', '_')](args)
+    except KeyboardInterrupt as error:
+        print(str(error) or 'Подготовка прервана; готовые этапы сохранены.', file=sys.stderr)
+        sys.exit(130)
     except (ValueError, OSError, RuntimeError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
         print('Error:', error, file=sys.stderr)
         sys.exit(1)

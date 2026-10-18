@@ -345,7 +345,7 @@ class JobRecovery(unittest.TestCase):
                 self.run_job()
                 return NS(returncode=0)
             return original(command, **kw)
-        with patch.object(course.subprocess, 'run', dispatch):
+        with patch.object(course, 'preparation_run', dispatch):
             course.prepare(args)
         self.assertEqual(downloads, [True])
         data = course.read(self.path / 'lessons/one/lesson.json')
@@ -367,7 +367,7 @@ class JobRecovery(unittest.TestCase):
                 self.run_job()
                 return NS(returncode=0)
             return original(command, **kw)
-        with patch.object(course.subprocess, 'run', dispatch):
+        with patch.object(course, 'preparation_run', dispatch):
             course.prepare(args)
             data = course.read(meta); old = data['prepared_fragments'][0]['folder']
             fragment_selection.fragments(NS(**vars(args), keep=[Path(old).name], expected_revision=data['revision']))
@@ -439,7 +439,7 @@ lecture.main()
                 processing_job.run_job(job_args, self.ffmpeg)
                 return NS(returncode=0)
             return original(command, **kw)
-        with patch.object(course.subprocess, 'run', dispatch), ThreadPoolExecutor(2) as pool:
+        with patch.object(course, 'preparation_run', dispatch), ThreadPoolExecutor(2) as pool:
             futures = [pool.submit(course.prepare, args) for _ in range(2)]
             for future in futures:
                 future.result(timeout=20)
@@ -462,7 +462,7 @@ lecture.main()
                 self.run_job()
                 return NS(returncode=0)
             return original(command, **kw)
-        with patch.object(course.subprocess, 'run', dispatch):
+        with patch.object(course, 'preparation_run', dispatch):
             course.prepare(args)
             old = Path(course.read(path / 'lessons/one/lesson.json')['prepared_fragments'][0]['folder'])
             (old / 'transcript.json').write_text('[]')
@@ -502,7 +502,7 @@ lecture.main()
                 ready.set()
                 if not release.wait(15): raise TimeoutError('Test interleaving timed out')
             return folder
-        with patch.object(course.subprocess, 'run', dispatch):
+        with patch.object(course, 'preparation_run', dispatch):
             course.prepare(args)
             with patch.object(publication, 'publish_job', gated), ThreadPoolExecutor(1, thread_name_prefix='old-job') as pool:
                 old = pool.submit(course.prepare, args)
@@ -530,7 +530,7 @@ lecture.main()
                 self.run_job()
                 return NS(returncode=0)
             return original(command,**kw)
-        with patch.object(course.subprocess,'run',dispatch):
+        with patch.object(course,'preparation_run',dispatch):
             course.prepare(args)
             before=course.read(path/'lessons/one/lesson.json')['prepared_fragments'][0]
             moved=self.root/'moved-course';path.rename(moved);args.course=moved

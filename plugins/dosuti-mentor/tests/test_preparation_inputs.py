@@ -20,7 +20,7 @@ class PreparationInputs(unittest.TestCase):
     def capture(self):
         commands=[]
         def stop(command,**kw):commands.append(command);raise RuntimeError('stop before ASR')
-        with patch('model_readiness.checked_model',return_value={'fingerprint':'QA'}),patch.object(course.subprocess,'run',stop),self.assertRaisesRegex(RuntimeError,'stop before ASR'):
+        with patch('model_readiness.checked_model',return_value={'fingerprint':'QA'}),patch.object(course,'preparation_run',stop),self.assertRaisesRegex(RuntimeError,'stop before ASR'):
             course.prepare(self.args)
         return commands[0],course.read(self.args.course/'lessons/one/lesson.json')
     def test_default_duration_uses_packet_timeline(self):

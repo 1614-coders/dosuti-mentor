@@ -6,6 +6,15 @@ from atomic_files import atomic_json
 from storage_lock import file_lock
 
 LABELS = {
+    'download': 'Получаю видео: скачиваю ссылку или проверяю локальный файл/кеш',
+    'video_ready': 'Видео получено; подготовка занятия ещё не выполнена',
+    'model_install': 'Проверяю или загружаю файлы локальной модели',
+    'worker': 'Ожидаю запуск обработки фрагмента; модель ещё может ожидать очередь',
+    'publish': 'Проверяю и сохраняю обработанный материал',
+    'review': 'Материал обработан; ожидает сверки кадров и кода в чате',
+    'frames_review': 'Разбираю кадры в чате',
+    'code_review': 'Связываю код с моментами видео в чате',
+    'ready': 'Занятие готово для указанного диапазона',
     'verify': 'Проверяю источник и сохранённые этапы',
     'probe': 'Проверяю видеопоток',
     'resources': 'Проверяю доступные ресурсы',
@@ -24,12 +33,19 @@ class Reporter:
     def __init__(self, folder):
         self.path = Path(folder) / 'processing-status.json'
         self.started = time.monotonic()
+        self.changed = self.started
         self.data = dict(schema='processing_status_v1', started_at=time.time())
 
     def set(self, stage, status='running', error=None, **details):
+        now = time.monotonic()
+        previous = self.data.get('stage')
+        if previous and self.data.get('status') == 'running':
+            timings = self.data.setdefault('stage_seconds', {})
+            timings[previous] = round(timings.get(previous, 0) + now - self.changed, 6)
+        self.changed = now
         self.data.update(details)
         self.data.update(stage=stage, label=LABELS[stage], status=status,
-                         elapsed_seconds=round(time.monotonic() - self.started, 2))
+                         elapsed_seconds=round(now - self.started, 2))
         if error is not None:
             self.data['error'] = type(error).__name__ + ': ' + str(error)[:300]
         atomic_json(self.path, self.data)
@@ -45,7 +61,7 @@ def describe(folder):
         data = json.loads(path.read_text(encoding='utf-8'))
         if (not isinstance(data, dict) or data.get('schema') != 'processing_status_v1'
                 or data.get('stage') not in LABELS
-                or data.get('status') not in ('running', 'complete', 'failed', 'interrupted')):
+                or data.get('status') not in ('running', 'complete', 'failed', 'interrupted', 'reported')):
             raise ValueError('Unknown processing status')
         if data['status'] == 'running':
             if busy:

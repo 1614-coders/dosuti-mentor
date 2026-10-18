@@ -35,6 +35,20 @@ class CodeStages(unittest.TestCase):
     def test_context_selects_intersecting_stage_only(self):
         self.save();self.assertEqual(len(self.f.context(20,5)['code_stages']),1)
         self.assertEqual(self.f.context(30,5)['code_stages'],[])
+
+    def test_quality_separates_partial_difference_and_outdated_annotation(self):
+        self.save(self.value(match='partial'))
+        summary=self.f.context(0,30)['quality_summary']['code']
+        self.assertEqual(summary['difference_ids'],[])
+        self.assertEqual(summary['partial_ids'],['first'])
+        stages.code_stage(self.args(remove='first'))
+        self.save(self.value(match='differs'))
+        self.assertEqual(self.f.context(0,30)['quality_summary']['code']['difference_ids'],['first'])
+        data=self.data();data['code_stages']['first']['source_sha256']='b'*64
+        course.save(self.f.lesson/'lesson.json',data)
+        summary=self.f.context(0,30)['quality_summary']['code']
+        self.assertEqual(summary['difference_ids'],[])
+        self.assertEqual(summary['stale_ids'],['first'])
     def test_historical_code_is_preserved_after_new_attachment(self):
         self.save();old=self.data()['code']['snapshot'];self.attach('x=2')
         row=self.f.context(0,30)['code_stages'][0]

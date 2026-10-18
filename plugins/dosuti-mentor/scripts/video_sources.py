@@ -14,6 +14,8 @@ from download_diagnostics import record as record_download_status
 from source_integrity import digest, file_hash, safe_asset
 from storage_lock import file_lock
 from storage_paths import source_kind, local_path
+from preparation_control import run as preparation_run
+from download_space import ensure as ensure_download_space
 
 MEDIA_EXTENSIONS = {'.mp4', '.mkv', '.webm', '.mov', '.avi', '.m4v', '.mpeg', '.mpg', '.ts'}
 
@@ -21,7 +23,7 @@ MEDIA_EXTENSIONS = {'.mp4', '.mkv', '.webm', '.mov', '.avi', '.m4v', '.mpeg', '.
 def validate_media(path):
     import imageio_ffmpeg
     # A login/error HTML page must never become a successful download.
-    result = subprocess.run([imageio_ffmpeg.get_ffmpeg_exe(), '-hide_banner', '-loglevel', 'error',
+    result = preparation_run([imageio_ffmpeg.get_ffmpeg_exe(), '-hide_banner', '-loglevel', 'error',
         '-i', str(path), '-map', '0:v:0', '-frames:v', '1', '-f', 'null', '-'],
         capture_output=True, timeout=60)
     if result.returncode:
@@ -72,11 +74,11 @@ def cached(assets, video):
     return None
 
 
-def curl(url, target, duration=1800):
+def curl(url, target, duration=1800, *, known_size=None):
     if duration > 30:
         from http_resume import download
-        return download(url, target, duration)
-    subprocess.run(['curl', '--location', '--fail', '--retry', '2', '--connect-timeout', '20',
+        return download(url, target, duration, known_size=known_size)
+    preparation_run(['curl', '--location', '--fail', '--retry', '2', '--connect-timeout', '20',
         '--max-time', str(duration), '--proto', '=http,https', '--proto-redir', '=http,https',
         '--silent', '--show-error', '--output', str(target), '--', url], check=True, timeout=duration+30)
 
@@ -93,7 +95,8 @@ def fetch_yandex(source, staging):
     if isinstance(size, bool) or not isinstance(size, int) or size <= 0:
         raise ValueError('Yandex video size is invalid')
     destination = staging / 'lecture.mp4'
-    curl(url, destination)
+    ensure_download_space(staging, size)
+    curl(url, destination, known_size=size)
     if destination.stat().st_size != size or file_hash(destination) != expected:
         raise ValueError('Downloaded video failed integrity check')
     return destination, 'yandex'
@@ -131,7 +134,7 @@ def run_site_download(command, timeout):
     # Capture diagnostics on disk; progress still uses yt-dlp stdout.
     with tempfile.TemporaryFile(mode='w+', encoding='utf-8') as errors:
         try:
-            result = subprocess.run(command, check=True, timeout=timeout, stderr=errors)
+            result = preparation_run(command, check=True, timeout=timeout, stderr=errors)
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
             errors.seek(0, 2); size = errors.tell(); errors.seek(max(0, size-32768))
             error.stderr = errors.read()
@@ -154,7 +157,7 @@ def fetch_site(source, staging, fragments=4, timeout=1800, quality='best'):
         from managed_storage import validate
         common += ['--cache-dir', str(validate(os.environ['DOSUTI_HOME']) / 'cache/yt-dlp')]
     try:
-        probe = subprocess.run(common + ['--flat-playlist', '--playlist-end', '2',
+        probe = preparation_run(common + ['--playlist-end', '2', '--format', fmt,
             '--dump-single-json', '--skip-download', '--', source],
             check=True, capture_output=True, text=True, timeout=120)
         info = json.loads(probe.stdout)
@@ -165,6 +168,10 @@ def fetch_site(source, staging, fragments=4, timeout=1800, quality='best'):
             entries = info.get('entries')
             if not isinstance(entries, list) or len(entries) != 1 or info.get('playlist_count', 1) != 1:
                 raise ValueError('Provide one lecture URL, not a playlist or page with multiple videos')
+        from download_planning import estimate
+        selected = info['entries'][0] if info.get('_type') in ('playlist', 'multi_video') else info
+        size, kind = estimate(selected if isinstance(selected, dict) else {})
+        ensure_download_space(staging, size, merge=True)
         run_site_download(common + ['--newline', '--progress', '--progress-delta', '5',
             '--concurrent-fragments', str(fragments), '--abort-on-unavailable-fragments', '--playlist-items', '1',
             '--format', fmt, '--fragment-retries', '3', '--match-filters', '!is_live',

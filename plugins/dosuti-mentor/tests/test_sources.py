@@ -42,7 +42,7 @@ class SourceAdapters(unittest.TestCase):
     def tearDown(self):
         self.temp.cleanup()
 
-    def fake_curl(self, url, target, duration=1800):
+    def fake_curl(self, url, target, duration=1800, **kwargs):
         self.calls.append(url)
         if 'cloud-api.yandex.net' in url:
             target.write_text(json.dumps(dict(type='file', file='https://cdn.example/video',
@@ -170,7 +170,7 @@ class SourceAdapters(unittest.TestCase):
         self.assertFalse((self.lesson/'video/download.json').exists())
 
     def test_yandex_bad_size_or_hash_is_rejected(self):
-        def bad(url, target, duration=1800):
+        def bad(url, target, duration=1800, **kwargs):
             if 'cloud-api' in url:
                 target.write_text(json.dumps(dict(type='file', file='https://cdn.example/video',
                     size=len(self.a), sha256=hashlib.sha256(self.b).hexdigest())))
