@@ -36,6 +36,19 @@ class Setup(unittest.TestCase):
         return dict(returncode=0,timed_out=False,output='QA command finished')
     def prepare(self):
         with contextlib.redirect_stdout(io.StringIO()),patch.object(setup,'run',self.fake):return setup.prepare(self.args)
+    def test_economy_mode_reaches_smoke_worker(self):
+        self.args.cpu_mode = 'economy'
+        self.prepare()
+        command = next(c for c in self.commands if any(str(v).endswith('lecture.py') for v in c))
+        self.assertEqual(command[command.index('--cpu-mode') + 1], 'economy')
+
+    def test_python_bootstrap_home_continues_without_existing_setup_journal(self):
+        from managed_storage import initialize
+        initialize(self.root)
+        result = self.prepare()
+        self.assertEqual(result['status'], 'passed')
+        self.assertTrue((self.root / 'setup.json').is_file())
+
     def test_complete_flow_and_project_lookup_without_pilot_path(self):
         result=self.prepare();root=self.root/'run'
         found=pilot.project_status(self.root/'project')

@@ -113,6 +113,14 @@ def finish(root, activity, status='passed', detail='', seconds=None, session='',
         return item
 
 
+def record_resources(root, activity, metrics):
+    with file_lock(root / '.activities.lock', timeout=.1):
+        value=read(root)
+        item=next(a for a in value['activities'] if a['id']==activity)
+        item['resources']=metrics
+        write(root,value)
+
+
 @contextmanager
 def span(stage, root=None, scope=None):
     selected = root or os.environ.get(ENV)
@@ -135,7 +143,9 @@ def span(stage, root=None, scope=None):
             before = time.monotonic()
             old = os.environ.get('DOSUTI_QA_PARENT');os.environ['DOSUTI_QA_PARENT']=item['id']
             try:
-                yield
+                from resource_usage import measure
+                with measure(selected,lambda metrics: record_resources(selected,item['id'],metrics)):
+                    yield
             except BaseException as error:
                 finish(selected,item['id'],'interrupted' if isinstance(error,(KeyboardInterrupt,SystemExit)) else 'failed',
                        type(error).__name__,time.monotonic()-before)

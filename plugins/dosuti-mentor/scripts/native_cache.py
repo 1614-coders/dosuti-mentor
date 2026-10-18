@@ -17,6 +17,11 @@ SCHEMA='native_ocr_build_v1'
 
 
 def host_root():
+    if os.environ.get('DOSUTI_HOME'):
+        from managed_storage import validate, safe
+        runtime = safe(validate(os.environ['DOSUTI_HOME']) / 'runtime')
+        runtime.mkdir(exist_ok=True)
+        return runtime / ('native-' + str(os.getuid()))
     return Path(tempfile.gettempdir())/('dosuti-mentor-native-'+str(os.getuid()))
 
 

@@ -72,6 +72,8 @@ def save(root, value):
                   literal(json.dumps(attempt['environment'], ensure_ascii=False)), '']
         for event in attempt['events']:
             lines += [f"### {event['step']}: {event['status']}", '', literal(event['observation']), '']
+            from resource_usage import markdown
+            lines += markdown(event.get('resources')) + ['']
         if attempt.get('inventory'):
             lines += ['Dependency inventory:', literal(json.dumps(attempt['inventory'], ensure_ascii=False)), '']
     checked(root / 'SETUP_REPORT.md');atomic_text(root / 'SETUP_REPORT.md', '\n'.join(lines))
@@ -175,18 +177,46 @@ def smoke_check(folder, output):
         note='Actual CPU processing completed; transcript correctness and teaching require human review.'))
 
 
+def video_worker(root, source, output, offline=False):
+    """Register once in QA; reuse the same pinned course asset for smoke and lessons."""
+    from types import SimpleNamespace
+    import course
+    import pilot
+    from pilot_activity import course_scope
+    root=pilot.checked_root(root);pilot.load(root)
+    folder=root/'course'
+    lesson='video-'+hashlib.sha256(source.encode('utf-8')).hexdigest()[:16]
+    directory=folder/'lessons'/lesson
+    if not (directory/'lesson.json').exists():
+        course.add_lesson(SimpleNamespace(course=folder,lesson=lesson,title='Первая лекция',video=source,order=1))
+    data=course.read(directory/'lesson.json')
+    if data['video']['source']!=source: raise ValueError('Registered source differs; preserve the course')
+    with course_scope(folder,'prepare'):
+        video,checksum=course.checked_video(directory,data,offline=offline)
+    atomic_json(output,dict(path=str(video),sha256=checksum,lesson=lesson,course=str(folder)))
+
+
 def prepare(args):
     root = safe_path(args.root)
+    from pilot_lifecycle import active
+    active(root)
     plugin = SCRIPTS.parent
     if root.is_relative_to(plugin) or plugin.is_relative_to(root):
         raise ValueError('Keep setup outside the plugin install tree')
     # Do not adopt an arbitrary pre-existing directory as our managed storage.
-    if root.exists(): read(root)
+    from managed_storage import MARKER, validate, initialize, session
+    if (root / 'setup.json').exists(): read(root)
+    elif (root / MARKER).exists():
+        validate(root)
+        save(root, dict(schema=SCHEMA, test_only=True, owner=uuid.uuid4().hex, attempts=[]))
+    elif root.exists(): read(root)  # Preserve refusal to adopt unrelated existing folders.
     else:
         root.mkdir(parents=True, exist_ok=False)
         save(root, dict(schema=SCHEMA, test_only=True, owner=uuid.uuid4().hex, attempts=[]))
+    initialize(root)
     lock = root / '.setup.lock';checked(lock)
     with file_lock(lock, timeout=.1):
+        active(root)
         value = read(root)
         if len(value['attempts']) >= 30: raise ValueError('Setup attempt limit reached')
         if value['attempts'] and value['attempts'][-1]['status'] == 'running':
@@ -204,7 +234,12 @@ def prepare(args):
             try:
                 log = root / f'attempt-{number:02d}-{name}.log';checked(log)
                 atomic_text(log, '')
-                result = run(command, timeout, log_path=log)
+                from resource_usage import measure
+                def publish(metrics):
+                    event['resources']=metrics
+                    save(root,value)
+                with session(root), measure(root,publish):
+                    result = run(command, timeout, log_path=log)
                 checked(log);atomic_text(log, result['output'])
                 if result['returncode'] != 0 or result['timed_out']:
                     raise RuntimeError(f'{name} failed; returncode={result["returncode"]}; timeout={result["timed_out"]}; see {log.name}; output tail: {result["output"][-3000:]}')
@@ -218,8 +253,12 @@ def prepare(args):
             if not math.isfinite(args.seconds) or not 1 <= args.seconds <= 60:
                 raise ValueError('Use a smoke interval of1..60seconds')
             if not math.isfinite(args.start) or args.start < 0: raise ValueError('Invalid smoke start')
-            video = safe_path(args.video);checked(video)
-            if not video.is_file(): raise ValueError('Choose an existing local video with audible speech')
+            from storage_paths import source_kind
+            remote=source_kind(str(args.video))=='remote'
+            video=None if remote else safe_path(args.video)
+            if video is not None:
+                checked(video)
+                if not video.is_file(): raise ValueError('Choose an existing local video with audible speech')
             runtime = safe_path(args.runtime or root / 'runtime')
             model = safe_path(args.model_path or root / 'models' / args.model)
             if any(p.is_relative_to(plugin) for p in (runtime, model)):
@@ -232,6 +271,24 @@ def prepare(args):
             if not args.offline:
                 step('dependencies', [sys.executable, '-B', str(SCRIPTS / 'setup_local.py'), '--runtime', str(runtime)])
             elif not python.is_file(): raise ValueError('Offline runtime missing; run online setup first')
+            if remote:
+                import pilot
+                run_root=root/'run'
+                if run_root.exists(): pilot.load(run_root)
+                else: pilot.start(run_root)
+                source_report=root/f'attempt-{number:02d}-source.json';checked(source_report)
+                command=[str(python),'-B',str(Path(__file__)),'--worker','video','--root',str(run_root),
+                         '--video',str(args.video),'--output',str(source_report)]
+                if args.offline: command.append('--offline')
+                step('video',command,3600)
+                source_data=json.loads(source_report.read_text(encoding='utf-8'))
+                video=safe_path(source_data['path']);checked(video)
+                if not video.is_relative_to(run_root/'course') or not video.is_file():
+                    raise ValueError('Downloaded video must remain inside the QA course')
+                from source_integrity import file_hash
+                if file_hash(video)!=source_data['sha256']: raise ValueError('Downloaded video changed before smoke')
+                attempt['source']=dict(lesson=source_data['lesson'],sha256=source_data['sha256'])
+                save(root,value)
             probe = root / f'attempt-{number:02d}-inventory.json';checked(probe)
             step('inventory', [str(python), '-B', str(Path(__file__)), '--worker', 'inventory', '--output', str(probe)])
             attempt['inventory'] = json.loads(probe.read_text(encoding='utf-8'));save(root, value)
@@ -242,7 +299,7 @@ def prepare(args):
             smoke = root / f'smoke-{number:02d}';checked(smoke, True)
             step('smoke', [str(python), '-B', str(SCRIPTS / 'lecture.py'), str(video), '--output', str(smoke),
                 '--model', str(model), '--start', str(args.start), '--duration', str(args.seconds), '--frame-every', '10',
-                '--language', args.language], 600)
+                '--language', args.language, '--cpu-mode', getattr(args, 'cpu_mode', 'standard')], 600)
             verification = root / f'attempt-{number:02d}-smoke.json';checked(verification)
             step('smoke-check', [str(python), '-B', str(Path(__file__)), '--worker', 'smoke', '--folder', str(smoke), '--output', str(verification)])
             import pilot
@@ -276,22 +333,24 @@ def main():
             if hasattr(stream, 'reconfigure'): stream.reconfigure(encoding='utf-8')
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--root', type=Path)
-    parser.add_argument('--video', type=Path)
+    parser.add_argument('--video', help='Local video path or public HTTP(S) lecture URL')
     parser.add_argument('--runtime', type=Path)
     parser.add_argument('--model-path', type=Path)
     parser.add_argument('--model', choices=['tiny','base','small','medium','large-v3'], default='small')
     parser.add_argument('--seconds', type=float, default=30)
     parser.add_argument('--start', type=float, default=0)
     parser.add_argument('--language', default='ru')
+    parser.add_argument('--cpu-mode', choices=['standard', 'economy'], default='standard')
     parser.add_argument('--offline', action='store_true')
     parser.add_argument('--status', action='store_true')
-    parser.add_argument('--worker', choices=['inventory','smoke','model'], help=argparse.SUPPRESS)
+    parser.add_argument('--worker', choices=['inventory','smoke','model','video'], help=argparse.SUPPRESS)
     parser.add_argument('--output', type=Path, help=argparse.SUPPRESS)
     parser.add_argument('--folder', type=Path, help=argparse.SUPPRESS)
     args = parser.parse_args()
     try:
         if args.worker == 'inventory': inventory(args.output);return
         if args.worker == 'smoke': smoke_check(args.folder, args.output);return
+        if args.worker == 'video': video_worker(args.root,args.video,args.output,args.offline);return
         if args.worker == 'model':
             from model_readiness import checked_model
             checked_model(args.model_path);return

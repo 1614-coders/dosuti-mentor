@@ -199,6 +199,21 @@ def headline(data,coverage,info):
     for item in info['activities']:
         seconds='неизвестно' if item['seconds'] is None else str(item['seconds'])
         lines.append(f"| {item['stage']} | {item['method']} | {item['status']} | {seconds} |")
+    from resource_usage import markdown
+    lines+=['','## Ресурсы компьютера','',
+            'Выборочные замеры каждые 2 с; короткие пики и завершившиеся между выборками процессы могут быть пропущены.',
+            'RSS — сумма рабочих наборов: общие страницы могут учитываться повторно. CPU в ядрах: 1 = одно полностью занятое логическое ядро.',
+            'Общесистемные показатели включают другие приложения. Свободное место относится ко всему диску; размер папки — логические байты.',
+            'Вложенные этапы используют замер родителя. Браузер/Codex и ожидание между Python-командами отдельно не отслеживаются.',
+            'До запуска Python, включая скачивание его частной копии, замеров нет. Старые прогоны не получают выдуманные показатели.','']
+    for item in info['activities']:
+        if item.get('resources'):
+            lines += [literal(item['stage'])] + markdown(item['resources']) + ['']
+    for attempt in info['setup']:
+        for event in attempt['events']:
+            lines += [literal(f"Установка {attempt['number']}: {event['step']}")] + markdown(event.get('resources')) + ['']
+    if not any(a.get('resources') for a in info['activities']) and not info['setup']:
+        lines += ['Замеры ресурсов не записаны.','']
     lines+=['','learner_wait — ожидание ученика. Интервалы нельзя складывать без учёта перекрытий.','', 'Отзыв человека:']
     feedback=[e['tester_feedback'] for e in data['events'] if e['tester_feedback']]
     lines+=[literal(value) for value in feedback] if feedback else ['    Пока не получен.']

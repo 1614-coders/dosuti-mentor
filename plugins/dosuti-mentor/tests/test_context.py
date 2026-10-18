@@ -76,6 +76,21 @@ class ContextRegression(unittest.TestCase):
             course.context(args)
         return json.loads(stream.getvalue())
 
+    def test_asr_quality_reaches_teaching_context_and_markdown(self):
+        folder = self.add('loop', 0, 60, [(i * 3, i * 3 + 3, 'Ничего.') for i in range(15)])
+        result = self.context(0, 60)
+        self.assertIn('asr_mass_repetition_requires_review', result['warnings'])
+        self.assertIn('asr_mass_repetition_requires_review', (folder / 'tutor_context.md').read_text())
+
+    def test_legacy_packet_is_diagnosed_without_rewriting(self):
+        folder = self.add('loop', 0, 60, [(i * 3, i * 3 + 3, 'Ничего.') for i in range(15)])
+        packet = course.read(folder / 'tutor_packet.json')
+        packet.pop('asr_quality')
+        self.save_packet(folder, packet)
+        before = (folder / 'tutor_packet.json').read_bytes()
+        self.assertIn('asr_mass_repetition_requires_review', self.context(0, 60)['warnings'])
+        self.assertEqual((folder / 'tutor_packet.json').read_bytes(), before)
+
     def test_adjacent_fragments_include_continuation(self):
         self.add('a', 0, 60, [(50, 60, 'First')])
         self.add('b', 60, 120, [(61, 80, 'Continuation')])

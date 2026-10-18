@@ -109,15 +109,16 @@ def plan(pilot, output):
                 requires_explicit_apply=True,plugin_and_chat_history='Separate Codex removal required')
 
 
-def _apply(pilot, plan_file):
+def _apply(pilot, plan_file, setup_only=False):
     from pilot import checked_root, load
     if plan_file is None: raise ValueError('--plan-file required')
     path=checked_root(plan_file)
     if not path.is_file() or path.stat().st_size>12_000_000: raise ValueError('Missing or oversized cleanup plan')
     value=json.loads(path.read_text(encoding='utf-8'));signature=value.pop('seal',None)
-    if value.get('schema')!='pilot_cleanup_v2' or seal(value)!=signature: raise ValueError('Cleanup plan changed or legacy plan; generate a new plan with export coverage')
+    expected_schema='setup_cleanup_v1' if setup_only else 'pilot_cleanup_v2'
+    if value.get('schema')!=expected_schema or seal(value)!=signature: raise ValueError('Cleanup plan changed or legacy plan; generate a new plan with export coverage')
     coverage=value.get('coverage')
-    if (not isinstance(coverage,dict) or coverage.get('schema')!='pilot_export_coverage_v1' or coverage.get('complete') is not True
+    if (not isinstance(coverage,dict) or coverage.get('schema')!=('setup_export_coverage_v1' if setup_only else 'pilot_export_coverage_v1') or coverage.get('complete') is not True
             or not coverage.get('entries') or any(e.get('status')!='complete' or e.get('detected')!=e.get('exported') for e in coverage['entries'])):
         raise ValueError('Incomplete export coverage; cleanup refused')
     root=checked_root(value['root']);pilot=checked_root(pilot)
@@ -141,14 +142,21 @@ def _apply(pilot, plan_file):
             raise ValueError('Another cleanup is pending')
     else:
         if receipt.exists(): raise ValueError('Unexpected existing cleanup receipt')
-        actual,owner=owned(pilot)
+        if setup_only:
+            from setup_cleanup import owner as setup_owner
+            actual,owner=root,setup_owner(root)
+        else: actual,owner=owned(pilot)
         if actual!=root or owner!=value['owner']: raise ValueError('Cleanup ownership changed')
     with ExitStack() as stack:
-        if not continuing: stack.enter_context(guard(pilot,timeout=.1))
+        if not continuing and not setup_only: stack.enter_context(guard(pilot,timeout=.1))
         for lock in lock_paths(root):
             if continuing or lock!=pilot/'.pilot-use.lock':
                 stack.enter_context(file_lock(lock,timeout=.1,create_parent=False))
-        if not continuing: idle(pilot)
+        if not continuing:
+            if setup_only:
+                from setup_cleanup import owner as setup_owner
+                if setup_owner(root)!=value['owner']: raise ValueError('Setup ownership changed')
+            else: idle(pilot)
         current=inventory(root);expected=value['entries']
         if any(name not in expected or expected[name]!=item for name,item in current.items()) or (not continuing and current!=expected):
             raise ValueError('Test files changed after the plan; nothing removed')
@@ -180,11 +188,11 @@ def _apply(pilot, plan_file):
     return dict(status='test_data_removed',receipt=str(receipt),report=str(report),plugin_removed=False,chat_history_removed=False)
 
 
-def apply(pilot, plan_file):
+def apply(pilot, plan_file, setup_only=False):
     if plan_file is None: raise ValueError('--plan-file required')
     from pilot import checked_root
     path=checked_root(plan_file)
     if not path.is_file(): raise ValueError('Cleanup plan missing')
     lock=path.with_name(path.name+'.apply.lock');checked(lock)
     with file_lock(lock,timeout=.1,create_parent=False):
-        return _apply(pilot,path)
+        return _apply(pilot,path,setup_only=setup_only)

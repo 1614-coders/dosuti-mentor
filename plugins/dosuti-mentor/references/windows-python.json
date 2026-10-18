@@ -1,0 +1,11 @@
+{
+  "version": "3.12.15",
+  "provider": "astral-sh/python-build-standalone",
+  "release": "20261013",
+  "platform": "win32-x64",
+  "url": "https://github.com/astral-sh/python-build-standalone/releases/download/20261013/cpython-3.12.15%2B20261013-x86_64-pc-windows-msvc-install_only_stripped.tar.gz",
+  "sha256": "7a2aef48e5ee569e310b29b32681debbc5d888e92790d85331a47736c6b06aad",
+  "python_exe_sha256": "407de1f8feb303d3249bb835e5ff7f543daada4e229c2c496d24a5b99fdba9ec",
+  "size": 22019610,
+  "documentation": "https://github.com/astral-sh/python-build-standalone/blob/main/docs/running.rst"
+}

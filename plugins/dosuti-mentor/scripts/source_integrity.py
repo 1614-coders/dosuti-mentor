@@ -9,6 +9,7 @@ from contextvars import ContextVar
 from functools import wraps
 
 _VERIFICATION=ContextVar("lecture_verification",default=None)
+_HASH_PATHS=ContextVar('lecture_hash_paths',default=None)
 
 def identity(path):
     value=Path(path).stat()
@@ -20,24 +21,32 @@ def drift(path,before,after,stage):
     return ValueError('Source changed during '+stage+': '+json.dumps(dict(file=str(Path(path).absolute()),changes=changes),ensure_ascii=False))
 
 
-def verification_session(function):
+def verification_session(function=None, *, paths=None):
     """Reuse hashes only within one read operation; recheck identities before return."""
+    if function is None:
+        return lambda target: verification_session(target, paths=paths)
     @wraps(function)
     def wrapped(*args,**kwargs):
         if _VERIFICATION.get() is not None:return function(*args,**kwargs)
+        allowed = None if paths is None else {str(Path(p).absolute()) for p in paths(*args, **kwargs)}
         cache={};token=_VERIFICATION.set(cache)
+        scope_token = _HASH_PATHS.set(allowed)
         try:
             result=function(*args,**kwargs)
             for name,(before,_) in cache.items():
                 after=identity(name)
                 if after!=before:raise drift(name,before,after,'verification')
             return result
-        finally:_VERIFICATION.reset(token)
+        finally:
+            _HASH_PATHS.reset(scope_token)
+            _VERIFICATION.reset(token)
     return wrapped
 
 
 def file_hash(path):
     path=Path(path);name=str(path.absolute());before=identity(path);cache=_VERIFICATION.get()
+    allowed = _HASH_PATHS.get()
+    if allowed is not None and name not in allowed: cache = None
     if cache is not None and name in cache:
         if cache[name][0]!=before:raise drift(path,cache[name][0],before,'verification')
         return cache[name][1]

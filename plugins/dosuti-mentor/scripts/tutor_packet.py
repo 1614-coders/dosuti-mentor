@@ -6,6 +6,7 @@ import math
 from lecture_context import number, interval
 from source_integrity import verify_evidence
 from atomic_files import atomic_json, atomic_text
+from asr_quality import diagnose
 
 
 RULES = """# Режим преподавания по записи
@@ -32,6 +33,8 @@ RULES = """# Режим преподавания по записи
    и твои дополнения имеют разное происхождение.
 6. Не исправляй неоднозначный ASR молча по общим знаниям. Если речь и кадры
    не дают уверенного ответа, пометь пробел и вернись к этому моменту видео.
+   При asr_quality.status=requires_review проверь подозрительные участки по
+   источнику до их объяснения. Отсутствие предупреждений не подтверждает текст.
 7. Прочитай visual_notes.json перед продолжением. Если материал находится в курсе
    course.py, читай и обновляй общий прогресс выбранного профиля через course.py,
    а не отдельный progress.json фрагмента. Для самостоятельного фрагмента без
@@ -102,6 +105,7 @@ def build_packet(folder, display_folder=None):
               'source_sha256': manifest.get('source_sha256'),
               'source_revision': manifest.get('source_revision'),
               'recognition': manifest.get('recognition', manifest.get('model')),
+              'asr_quality': diagnose(records),
               'pipeline_version': manifest.get('pipeline_version'),
               'audio_quality': manifest.get('audio_quality', {'status': 'legacy_unverified', 'warnings': ['legacy_media_timeline_requires_rebuild']}),
               'media': manifest.get('media'),
@@ -119,6 +123,7 @@ def build_packet(folder, display_folder=None):
              f"Источник: {manifest['source']}. Обработано {stamp(start)}–{stamp(end)}.", '',
              'Сначала прочитай TUTOR_RULES.md, visual_notes.json и progress.json.',
              'Ниже полный распознанный текст и кадры в хронологическом порядке.', '']
+    lines.extend(['Диагностика ASR: ' + json.dumps(packet['asr_quality'], ensure_ascii=False), ''])
     events = [(r['start'], 1, r) for r in speech] + [(f['approx_seconds'], 0, f) for f in frames]
     for seconds, kind, item in sorted(events, key=lambda e: (e[0], e[1])):
         if kind:

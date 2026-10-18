@@ -9,13 +9,15 @@ import wave
 from atomic_files import atomic_json, atomic_text
 from pilot_activity import span
 from model_readiness import inspect_model, model_lock
-from source_integrity import file_hash, source_matches, evidence_hashes, verify_evidence
+from source_integrity import file_hash, source_matches, evidence_hashes, verify_evidence, verification_session
 from storage_lock import file_lock
 from screen_evidence import extract_frames
 from media_input import PIPELINE_VERSION, probe_media, extract_audio
 
 MANAGED = ('audio.wav', 'frames', 'manifest.json', 'transcript.json', 'transcript.md',
            'tutor_packet.json', 'tutor_context.md', 'TUTOR_RULES.md', 'visual_notes.json', 'progress.json')
+# Windows st_ctime is creation time, so retain full source rehashes there.
+CACHE_SOURCE_HASHES = os.name != 'nt'
 
 
 def pcm_duration(path):
@@ -46,7 +48,12 @@ def run_job(args, ffmpeg):
             raise
 
 
+@verification_session(paths=lambda args, ffmpeg, out: [args.video] if CACHE_SOURCE_HASHES else [])
 def process(args, ffmpeg, out):
+    from cpu_policy import policy
+    limits = policy(getattr(args, 'cpu_mode', 'standard'))
+    extraction_options = dict(threads=limits['ffmpeg_threads']) if limits['ffmpeg_threads'] else {}
+    print(f"CPU mode: {limits['mode']} ({limits['asr_threads']} ASR threads); completed stages are reused", flush=True)
     checksum = file_hash(args.video)
     inputs = dict(start=args.start, duration=args.duration, frame_every=args.frame_every,
                   audio_track=getattr(args, 'audio_track', None), audio_channel=getattr(args, 'audio_channel', None))
@@ -100,12 +107,13 @@ def process(args, ffmpeg, out):
         print('Extracting audio…', flush=True)
         with span('audio', scope=out):
             temporary, quality = extract_audio(args.video.resolve(), out, args.start, duration, media, ffmpeg,
-                audio_track=inputs['audio_track'], audio_channel=inputs['audio_channel'])
+                audio_track=inputs['audio_track'], audio_channel=inputs['audio_channel'], **extraction_options)
             pcm_duration(temporary)
             if file_hash(args.video) != checksum:
                 raise ValueError('Video changed during extraction; use a fresh output directory')
             temporary.replace(out / 'audio.wav')
-            stages['audio'] = dict(sha256=file_hash(out / 'audio.wav'), duration=duration, quality=quality)
+            stages['audio'] = dict(sha256=file_hash(out / 'audio.wav'), duration=duration, quality=quality,
+                                   execution=limits)
             persist(out, state)
     elif not (out / 'audio.wav').is_file() or file_hash(out / 'audio.wav') != stages['audio']['sha256']:
         raise ValueError('Prepared audio integrity changed; use course.py prepare --rebuild')
@@ -116,7 +124,7 @@ def process(args, ffmpeg, out):
         staging.mkdir()
         print('Extracting screen frames…', flush=True)
         with span('frames', scope=out):
-            frames=extract_frames(args.video,staging,args.start,stages['audio']['duration'],args.frame_every,ffmpeg)
+            frames=extract_frames(args.video,staging,args.start,stages['audio']['duration'],args.frame_every,ffmpeg, **extraction_options)
             if file_hash(args.video) != checksum:
                 raise ValueError('Video changed during extraction; use a fresh output directory')
             if (out / 'frames').exists():
@@ -124,7 +132,7 @@ def process(args, ffmpeg, out):
             staging.replace(out / 'frames')
             for frame in frames:
                 frame['file']='frames/'+frame['file']
-            stages['frames'] = dict(items=frames, hashes=evidence_hashes(out, dict(frames=frames)))
+            stages['frames'] = dict(items=frames, hashes=evidence_hashes(out, dict(frames=frames)), execution=limits)
             persist(out, state)
     metadata = dict(source=args.video.name, source_path=str(args.video.resolve()), source_size=args.video.stat().st_size,
         source_sha256=checksum, source_revision='sha256:' + checksum, start=args.start,
@@ -160,19 +168,19 @@ def process(args, ffmpeg, out):
             from faster_whisper import WhisperModel
             print(f'Loading local model {model_path}…', flush=True)
             with span('model_load', scope=out):
-                model = WhisperModel(str(model_path), device='cpu', compute_type='int8', cpu_threads=4)
+                model = WhisperModel(str(model_path), device='cpu', compute_type='int8', cpu_threads=limits['asr_threads'])
                 from bounded_features import BoundedFeatureExtractor
                 model.feature_extractor = BoundedFeatureExtractor(model.feature_extractor)
     if not previous:
         with span('asr', scope=out):
-            import numpy as np
-            with wave.open(str(out / 'audio.wav'), 'rb') as wav:
-                audio = np.frombuffer(wav.readframes(wav.getnframes()), dtype='<i2').astype(np.float32)
-                audio /= 32768.0
+            from pcm_audio import read_pcm
+            audio = read_pcm(out / 'audio.wav')
             if metadata['audio_quality']['status'] in ('silent','no_audio_track'):
                 from types import SimpleNamespace
                 segments, info = iter([]), SimpleNamespace(language=args.language)
             else:
+                from bounded_vad import install as install_bounded_vad
+                install_bounded_vad()
                 segments, info = model.transcribe(audio, initial_prompt=args.prompt or None, language=args.language, vad_filter=True)
             records = []
             for segment in segments:
@@ -184,6 +192,8 @@ def process(args, ffmpeg, out):
                     asr_start=segment.start + args.start, asr_end=segment.end + args.start,
                     avg_logprob=segment.avg_logprob, no_speech_prob=segment.no_speech_prob, compression_ratio=segment.compression_ratio))
                 print(f'ASR source time: {end:.2f}', flush=True)
+            # A finished generator can still hold the model and full PCM array.
+            del segments, audio, model
             if file_hash(args.video) != checksum:
                 raise ValueError('Video changed during recognition; use a fresh output directory')
             verify_evidence(out, metadata, transcript=False, audio=True)
@@ -192,7 +202,9 @@ def process(args, ffmpeg, out):
                         '\n\n'.join(f'[{r["start"]:.2f}–{r["end"]:.2f}] {r["text"]}' for r in records))
             stages['recognition'] = dict(settings=settings, sha256=file_hash(out / 'transcript.json'),
                 info=dict(model=str(model_path), language=info.language, segments=len(records),
-                          feature_extraction='bounded_logmel_v1'))
+                          feature_extraction='bounded_logmel_v1', vad_batch_frames=512,
+                          speech_collection='linear_if_32_chunks_v1',
+                          cpu_mode=limits['mode'], cpu_threads=limits['asr_threads']))
             persist(out, state)
     metadata['recognition'] = stages['recognition']['info']
     if not metadata['recognition']['segments']:

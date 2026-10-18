@@ -59,6 +59,8 @@ class JobRecovery(unittest.TestCase):
                        frame_every=.5, model=str(self.model), language='ru', prompt='',
                        resume=True, prepare_only=False)
         self.loads, self.recognitions = [], []
+        self.vad_patch = patch('bounded_vad.install')
+        self.vad_patch.start()
         owner = self
         class Model:
             def __init__(self, *a, **kw):
@@ -74,6 +76,7 @@ class JobRecovery(unittest.TestCase):
         sys.modules['faster_whisper'] = NS(WhisperModel=Model)
 
     def tearDown(self):
+        self.vad_patch.stop()
         if self.saved_model_module is None:
             sys.modules.pop('faster_whisper', None)
         else:
@@ -135,6 +138,83 @@ class JobRecovery(unittest.TestCase):
         self.run_job()
         self.assertEqual(len(self.loads), 1)
         self.assertEqual(len(self.recognitions), 1)
+
+    def test_economy_limits_inference_and_extraction(self):
+        self.args.cpu_mode = 'economy'
+        with patch.object(self.model_class, '__init__', return_value=None) as load, \
+                patch('bounded_features.BoundedFeatureExtractor'), \
+                patch.object(self.model_class, 'feature_extractor', NS(), create=True), \
+                patch.object(processing_job, 'extract_audio', wraps=processing_job.extract_audio) as audio, \
+                patch.object(processing_job, 'extract_frames', wraps=processing_job.extract_frames) as frames:
+            self.run_job()
+        self.assertEqual(load.call_args.kwargs['cpu_threads'], 2)
+        self.assertEqual(audio.call_args.kwargs['threads'], 1)
+        self.assertEqual(frames.call_args.kwargs['threads'], 1)
+        info = json.loads((self.out / 'manifest.json').read_text())['recognition']
+        self.assertEqual(info['cpu_mode'], 'economy')
+
+    def test_switching_cpu_mode_reuses_completed_result_and_progress(self):
+        self.run_job()
+        files = ['audio.wav', 'transcript.json', 'tutor_packet.json', 'progress.json']
+        before = {name: file_hash(self.out / name) for name in files}
+        self.args.cpu_mode = 'economy'
+        with patch.object(processing_job.subprocess, 'run', side_effect=AssertionError('No extraction')):
+            self.run_job()
+        self.assertEqual(len(self.recognitions), 1)
+        self.assertEqual(before, {name: file_hash(self.out / name) for name in files})
+        self.assertEqual(json.loads((self.out / 'manifest.json').read_text())['recognition']['cpu_mode'], 'standard')
+
+    def test_hashes_are_reused_only_during_one_processing_call(self):
+        import hashlib
+        hashed = []
+        original = hashlib.file_digest
+        def count(stream, *args, **kwargs):
+            hashed.append(str(stream.name))
+            return original(stream, *args, **kwargs)
+        with patch('hashlib.file_digest', count): self.run_job()
+        if processing_job.CACHE_SOURCE_HASHES: self.assertEqual(hashed.count(str(self.video)), 1)
+        else: self.assertGreater(hashed.count(str(self.video)), 1)
+        self.assertGreater(hashed.count(str((self.out / 'audio.wav').resolve())), 1)
+        hashed.clear()
+        with patch('hashlib.file_digest', count): self.run_job()
+        if processing_job.CACHE_SOURCE_HASHES: self.assertEqual(hashed.count(str(self.video)), 1)
+        else: self.assertGreater(hashed.count(str(self.video)), 1)
+
+    def test_windows_hash_policy_preserves_full_source_checks(self):
+        import hashlib
+        original = hashlib.file_digest; sources = []
+        def count(stream, *args, **kwargs):
+            if str(stream.name) == str(self.video): sources.append(True)
+            return original(stream, *args, **kwargs)
+        with patch.object(processing_job, 'CACHE_SOURCE_HASHES', False), patch('hashlib.file_digest', count):
+            self.run_job()
+        self.assertGreater(len(sources), 1)
+
+    def test_source_mutation_during_asr_still_rejected_with_hash_reuse(self):
+        original = self.model_class.transcribe
+        def mutate(model, *args, **kwargs):
+            result = original(model, *args, **kwargs)
+            self.video.write_bytes(self.b)
+            return result
+        with patch.object(self.model_class, 'transcribe', mutate):
+            with self.assertRaisesRegex(ValueError, 'changed'):
+                self.run_job()
+        self.assertFalse((self.out / 'transcript.json').exists())
+
+    def test_model_and_pcm_released_before_packet_assembly(self):
+        import weakref
+        references = []
+        original = self.model_class.transcribe
+        def capture(model, audio, **kwargs):
+            references.extend([weakref.ref(model), weakref.ref(audio)])
+            return original(model, audio, **kwargs)
+        build = tutor_packet.build_packet
+        def check(*args, **kwargs):
+            self.assertTrue(references)
+            self.assertTrue(all(ref() is None for ref in references))
+            return build(*args, **kwargs)
+        with patch.object(self.model_class, 'transcribe', capture), patch.object(tutor_packet, 'build_packet', check):
+            self.run_job()
 
     def test_completed_repeat_does_no_extraction_or_asr(self):
         self.run_job()

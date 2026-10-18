@@ -75,7 +75,7 @@ def signal_stats(path):
                 mono_rms=math.sqrt(mono_squares / total), samples=total, channels=channels)
 
 
-def extract_audio(video, folder, start, duration, media, ffmpeg, audio_track=None, audio_channel=None):
+def extract_audio(video, folder, start, duration, media, ffmpeg, audio_track=None, audio_channel=None, threads=None):
     """Track numbers are absolute stream indexes; channel numbers are zero based."""
     tracks = media['audio']
     if audio_track is not None:
@@ -94,9 +94,11 @@ def extract_audio(video, folder, start, duration, media, ffmpeg, audio_track=Non
             paths.append(target)
             # first_pts=0 pads a late first packet after input seeking; apad keeps the visual tail.
             result = subprocess.run([ffmpeg, '-hide_banner', '-loglevel', 'error', '-xerror', '-y',
+                *(['-threads', str(threads), '-filter_threads', str(threads)] if threads else []),
                 '-ss', str(start), '-i', str(video), '-map', f'0:{track["index"]}', '-vn',
                 '-af', f'aresample=16000:async=1:first_pts=0,apad=whole_dur={duration}',
-                '-ar', '16000', '-t', str(duration), '-c:a', 'pcm_s16le', str(target)],
+                '-ar', '16000', '-t', str(duration), '-c:a', 'pcm_s16le',
+                *(['-threads', str(threads)] if threads else []), str(target)],
                 check=True, capture_output=True, text=True)
             errors = decoding_errors(result.stderr)
             if errors:

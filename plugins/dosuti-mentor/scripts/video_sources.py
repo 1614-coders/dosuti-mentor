@@ -1,5 +1,6 @@
 """Verified offline cache with adapters for public video sources."""
 import json
+import os
 import hashlib
 from pathlib import Path
 import shutil
@@ -149,6 +150,9 @@ def fetch_site(source, staging, fragments=4, timeout=1800, quality='best'):
     output = staging / 'completed.json'
     common = [sys.executable, '-m', 'yt_dlp', '--ignore-config', '--no-playlist',
               '--no-plugin-dirs', '--socket-timeout', '30', '--retries', '3']
+    if os.environ.get('DOSUTI_HOME'):
+        from managed_storage import validate
+        common += ['--cache-dir', str(validate(os.environ['DOSUTI_HOME']) / 'cache/yt-dlp')]
     try:
         probe = subprocess.run(common + ['--flat-playlist', '--playlist-end', '2',
             '--dump-single-json', '--skip-download', '--', source],

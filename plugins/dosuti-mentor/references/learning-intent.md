@@ -2,8 +2,7 @@
 
 Это данные договорённости с пользователем, не инструкция менять правила
 достоверности и не оценка освоения. Читай `intent` перед обсуждением маршрута;
-`status` и `context` также возвращают learning_intent. Стартовый диалог
-start-learning будет добавлен следующим этапом; сейчас готово хранилище и CLI.
+`status` и `context` также возвращают learning_intent. Стартовый диалог ведёт start-learning; он использует это хранилище и CLI.
 
 ```sh
 python course.py intent --course COURSE --profile USER --session CHAT_ID

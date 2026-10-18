@@ -4,6 +4,7 @@ import hashlib
 import json
 import math
 from pathlib import Path
+from asr_quality import diagnose
 from source_integrity import (file_hash, source_matches, verify_evidence,
                               check_local_video, verify_snapshot, digest)
 
@@ -91,6 +92,7 @@ def load_fragment(fragment, directory, expected_hash):
                   rules_file=str(folder / 'TUTOR_RULES.md'),
                   notes_file=str(folder / 'visual_notes.json'), coverage=packet['coverage'],
                   recognition=packet.get('recognition'), limitations=packet.get('limitations', []),
+                  asr_quality=diagnose(packet['speech']),
                   audio_quality=packet.get('audio_quality', {'status': 'legacy_unverified', 'warnings': ['legacy_media_timeline_requires_rebuild']}))
     if not Path(source['rules_file']).is_file():
         raise ValueError(f'Missing teaching rules: {source["rules_file"]}')
@@ -295,7 +297,7 @@ def assemble(directory, data, start, window, include_code_stages=True, include_t
     if any(n.get('stale') for n in notes['observations']+notes['uncertainties']):
         warnings.append('attached_code_notes_stale_or_unverifiable')
     for packet, source in packets:
-        for warning in source['audio_quality'].get('warnings', []):
+        for warning in source['audio_quality'].get('warnings', []) + source['asr_quality']['warnings']:
             if warning not in warnings:
                 warnings.append(warning)
     for field in ('processing_jobs','screen_jobs'):

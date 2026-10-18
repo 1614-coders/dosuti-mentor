@@ -14,6 +14,7 @@ from urllib.parse import urlparse, quote
 import uuid
 import zipfile
 from storage_lock import file_lock
+from managed_storage import managed_operation, find_home, session
 from storage_paths import source_kind, local_path, anchored, resolved
 from source_integrity import (digest, source_matches, verify_evidence, check_local_video,
                               seal_snapshot, verify_snapshot)
@@ -415,10 +416,15 @@ def download_video(directory, data, fragments=4, site_timeout=1800, quality='bes
     return acquire(directory, data['video'], fragments, site_timeout, quality)
 
 
-def checked_video(directory, data, fragments=4, site_timeout=1800, quality='best'):
+def checked_video(directory, data, fragments=4, site_timeout=1800, quality='best', offline=False):
     from compact_lesson import require_media_open
     require_media_open(directory)
-    video = download_video(directory, data, fragments, site_timeout, quality)
+    if offline and source_kind(data['video']['source'])=='remote':
+        from video_sources import cached
+        video=cached(directory/'video',data['video'])
+        if video is None: raise ValueError('Offline video cache is unavailable; retry online or provide a local file')
+    else:
+        video = download_video(directory, data, fragments, site_timeout, quality)
     checksum = file_hash(video)
     expected = data['video'].get('sha256')
     if expected and checksum != digest(expected, 'Registered video SHA256'):
@@ -435,6 +441,7 @@ def checked_video(directory, data, fragments=4, site_timeout=1800, quality='best
     return video, checksum
 
 
+@managed_operation
 def prepare(args):
     from model_readiness import checked_model, ModelNotReady, repair_type
     from publication import publish_job
@@ -479,7 +486,9 @@ def prepare(args):
                 duration = probe_media(video)['video']['end'] - args.start
             if duration <= 0:
                 raise ValueError('Fragment duration must be positive')
-            model_path = args.model_path.resolve() if args.model_path else root(args) / '.runtime/models' / args.model
+            home = find_home(root(args))
+            models = home / 'models' if home else root(args) / '.runtime/models'
+            model_path = args.model_path.resolve() if args.model_path else models / args.model
             try:
                 model_info = checked_model(model_path)
             except ModelNotReady:
@@ -505,6 +514,7 @@ def prepare(args):
             command = [sys.executable, str(SCRIPT_DIR / 'lecture.py'), str(video), '--output', str(working),
                        '--start', str(args.start), '--duration', str(duration), '--frame-every', str(args.frame_every),
                        '--model', str(model_path), '--language', args.language]
+            command += ['--cpu-mode', getattr(args, 'cpu_mode', 'standard')]
             if prompt:
                 command += ['--prompt', prompt]
             for field in ('audio_track','audio_channel'):
@@ -809,6 +819,8 @@ def main():
             command.add_argument('--ref')
             command.add_argument('--resource-type', choices=['article', 'video', 'file'], default='article')
         elif name == 'prepare':
+            command.add_argument('--cpu-mode', choices=['standard', 'economy'], default='standard',
+                                 help='Economy limits CPU parallelism; keeps the same model and decoding')
             command.add_argument('--video-quality',choices=['best','360','480','720','1080'],default='best')
             command.add_argument('--download-fragments',type=int,choices=range(1,9),default=4)
             command.add_argument('--site-timeout',type=int,default=1800,help='Site download timeout in seconds: 120..7200')
@@ -863,7 +875,9 @@ def main():
     args = parser.parse_args()
     try:
         from pilot_activity import course_scope
-        with course_scope(getattr(args, "course", None), args.command):
+        scope = getattr(args, 'course', None)
+        home = find_home(scope) if scope is not None and args.command != 'prepare' else None
+        with course_scope(scope, args.command), session(home):
             if args.command == 'spoken-homework':
                 from spoken_homework import dispatch
                 print(json.dumps(dispatch(args), ensure_ascii=False, indent=2))

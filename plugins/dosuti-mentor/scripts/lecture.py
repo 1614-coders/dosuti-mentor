@@ -4,7 +4,16 @@ import math
 import os
 from pathlib import Path
 import subprocess  # Shared module retained for controlled failure injection in tests.
-from processing_job import run_job
+
+
+def run_job(args, ffmpeg):
+    # Defer NumPy imports until the worker's thread environment is configured.
+    from managed_storage import session, find_home
+    from heavy_work import slot
+    home=find_home(args.output)
+    with session(home), slot(home):
+        from processing_job import run_job as process
+        return process(args, ffmpeg)
 
 
 def main():
@@ -18,6 +27,8 @@ def main():
     parser.add_argument('--model', default='small')
     parser.add_argument('--language', default='ru')
     parser.add_argument('--prompt', default='')
+    parser.add_argument('--cpu-mode', choices=['standard', 'economy'], default='standard',
+                        help='Economy: 2 ASR threads and 1 FFmpeg thread; processing may take longer')
     parser.add_argument('--audio-track', type=int, help='Absolute audio stream index; required when several nonempty tracks exist')
     parser.add_argument('--audio-channel', type=int, help='Zero-based channel index; otherwise detect destructive cancellation')
     parser.add_argument('--prepare-only', action='store_true')
@@ -30,6 +41,8 @@ def main():
         parser.error('Start must be nonnegative; duration and frame interval positive')
     if any(v is not None and v < 0 for v in (args.audio_track, args.audio_channel)):
         parser.error('Audio track/channel indexes must be nonnegative')
+    from cpu_policy import configure_environment
+    configure_environment(args.cpu_mode)
     import imageio_ffmpeg
     import certifi
     os.environ.setdefault('SSL_CERT_FILE', certifi.where())
