@@ -56,7 +56,7 @@ def run_job(args, ffmpeg):
 
 
 @verification_session(paths=lambda args, ffmpeg, out, report=None: [args.video] if CACHE_SOURCE_HASHES else [])
-def process(args, ffmpeg, out, report=lambda stage: None):
+def process(args, ffmpeg, out, report=lambda stage, **details: None):
     from cpu_policy import policy
     limits = policy(getattr(args, 'cpu_mode', 'standard'))
     extraction_options = dict(threads=limits['ffmpeg_threads']) if limits['ffmpeg_threads'] else {}
@@ -111,6 +111,14 @@ def process(args, ffmpeg, out, report=lambda stage: None):
     duration = min(args.duration, media['video']['end'] - args.start)
     if duration <= 0:
         raise ValueError('No video in requested interval')
+    from resource_preflight import inspect as inspect_resources, enforce
+    recognition_needed = not args.prepare_only and 'recognition' not in stages
+    pending = any(name not in stages for name in ('audio', 'frames')) or (
+        not args.prepare_only and 'packet' not in stages)
+    resources = inspect_resources(out, duration, audio_needed='audio' not in stages,
+                                  recognition_needed=recognition_needed, pending=pending)
+    report('resources', resources=resources)
+    enforce(resources)
     if 'audio' not in stages:
         report('audio')
         print('Extracting audio…', flush=True)

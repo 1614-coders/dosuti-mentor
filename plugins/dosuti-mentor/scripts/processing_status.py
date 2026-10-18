@@ -8,6 +8,7 @@ from storage_lock import file_lock
 LABELS = {
     'verify': 'Проверяю источник и сохранённые этапы',
     'probe': 'Проверяю видеопоток',
+    'resources': 'Проверяю доступные ресурсы',
     'audio': 'Извлекаю аудио',
     'frames': 'Извлекаю кадры',
     'model_load': 'Загружаю локальную модель',
@@ -25,7 +26,8 @@ class Reporter:
         self.started = time.monotonic()
         self.data = dict(schema='processing_status_v1', started_at=time.time())
 
-    def set(self, stage, status='running', error=None):
+    def set(self, stage, status='running', error=None, **details):
+        self.data.update(details)
         self.data.update(stage=stage, label=LABELS[stage], status=status,
                          elapsed_seconds=round(time.monotonic() - self.started, 2))
         if error is not None:

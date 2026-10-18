@@ -115,6 +115,29 @@ class JobRecovery(unittest.TestCase):
     def test_failure_during_frames_preserves_verified_audio(self):
         self.assertEqual(self.interrupt('frames'), {'audio': 1, 'frames': 2})
 
+    def test_low_disk_stops_before_extraction_then_resumes(self):
+        with patch('resource_preflight.shutil.disk_usage', return_value=NS(free=0)), \
+                patch.object(processing_job, 'extract_audio') as extraction:
+            with self.assertRaisesRegex(ValueError, 'Недостаточно места'):
+                self.run_job()
+            extraction.assert_not_called()
+        self.assertEqual(self.loads, [])
+        status = processing_status.describe(self.out)
+        self.assertEqual((status['status'], status['stage']), ('failed', 'resources'))
+        self.assertTrue(status['resources']['blocked'])
+        self.assertNotIn('audio', json.loads((self.out / 'checkpoint.json').read_text())['stages'])
+        self.run_job()
+        self.assertEqual(processing_status.describe(self.out)['status'], 'complete')
+
+    def test_low_disk_does_not_block_reusing_finished_job(self):
+        self.run_job()
+        before = file_hash(self.out / 'tutor_packet.json')
+        with patch('resource_preflight.shutil.disk_usage', return_value=NS(free=0)), \
+                patch('resource_preflight.available_memory', side_effect=AssertionError('No ASR needed')):
+            self.run_job()
+        self.assertEqual(file_hash(self.out / 'tutor_packet.json'), before)
+        self.assertEqual(len(self.recognitions), 1)
+
     def test_asr_exception_reuses_audio_and_frames(self):
         original = self.model_class.transcribe
         def broken(*a, **kw):
