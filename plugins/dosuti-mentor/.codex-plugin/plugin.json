@@ -1,6 +1,6 @@
 {
   "name": "dosuti-mentor",
-  "version": "0.4.56",
+  "version": "0.4.57",
   "description": "Помощник в обучении: цели, лекции, код и практика",
   "skills": "./skills/",
   "extensions": {

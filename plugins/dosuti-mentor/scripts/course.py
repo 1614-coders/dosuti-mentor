@@ -662,12 +662,18 @@ def status(args):
     lessons.sort(key=lambda x: (x['order'], x['id']))
     from material_sources import describe
     from download_diagnostics import describe as download_status
+    from processing_status import describe as processing_status
     for lesson in lessons:
         slug(lesson['id'])
         from spoken_homework import resolve as resolve_homework
         lesson['homework'] = resolve_homework(root(args)/'lessons'/lesson['id'], lesson)
         lesson['resources']=describe(lesson['resources'])
         lesson['download_diagnostics']=download_status(root(args)/'lessons'/lesson['id'],lesson['video'])
+        directory = root(args) / 'lessons' / lesson['id']
+        for job in lesson.get('processing_jobs', {}).values():
+            working = directory / '.jobs' / slug(job['job_key'])
+            job['processing_status'] = (processing_status(working)
+                if working.resolve().is_relative_to(directory.resolve()) else {'status': 'unavailable'})
     with db(args) as connection:
         states = visible_progress(connection.execute('SELECT * FROM progress ORDER BY updated'),
                                   {lesson['id']: lesson for lesson in lessons})

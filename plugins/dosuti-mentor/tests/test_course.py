@@ -46,6 +46,23 @@ class CourseWorkflow(unittest.TestCase):
         self.assertEqual(friend['progress'], [])
         self.assertEqual(friend['chat_bindings'], [])
 
+    def test_status_exposes_worker_stage_without_rewriting_lesson(self):
+        meta = self.course / 'lessons/lesson-01/lesson.json'
+        lesson = json.loads(meta.read_text())
+        lesson['processing_jobs'] = {'base': {'job_key': 'example', 'status': 'pending'}}
+        meta.write_text(json.dumps(lesson))
+        working = meta.parent / '.jobs/example'
+        working.mkdir(parents=True)
+        (working / '.processing.lock').touch()
+        (working / 'processing-status.json').write_text(json.dumps(dict(
+            schema='processing_status_v1', stage='frames', status='running',
+            label='Извлекаю кадры', started_at=1, elapsed_seconds=3)))
+        before = meta.read_bytes()
+        result = json.loads(self.run_cli('status'))
+        status = result['lessons'][0]['processing_jobs']['base']['processing_status']
+        self.assertEqual((status['status'], status['stage']), ('interrupted', 'frames'))
+        self.assertEqual(meta.read_bytes(), before)
+
     def test_code_snapshots_preserve_lecture_versions(self):
         teacher = self.directory / 'teacher'
         teacher.mkdir()

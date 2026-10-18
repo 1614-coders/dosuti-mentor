@@ -18,6 +18,7 @@ sys.path.insert(0, str(SCRIPTS))
 import course
 import download_model
 import processing_job
+import processing_status
 import publication
 import test_integrity as fixtures
 import tutor_packet
@@ -135,9 +136,20 @@ class JobRecovery(unittest.TestCase):
             with self.assertRaises(OSError):
                 self.run_job()
         self.assertEqual(len(self.recognitions), 1)
+        status = processing_status.describe(self.out)
+        self.assertEqual((status['status'], status['stage']), ('failed', 'packet'))
+        self.assertIn('Disk interruption', status['error'])
+        self.args.prepare_only = True
+        self.run_job()
+        self.assertEqual(processing_status.describe(self.out)['stage'], 'recognized')
+        self.assertFalse((self.out / 'tutor_packet.json').exists())
+        self.args.prepare_only = False
         self.run_job()
         self.assertEqual(len(self.loads), 1)
         self.assertEqual(len(self.recognitions), 1)
+        status = processing_status.describe(self.out)
+        self.assertEqual((status['status'], status['stage']), ('complete', 'complete'))
+        self.assertNotIn('error', status)
 
     def test_economy_limits_inference_and_extraction(self):
         self.args.cpu_mode = 'economy'
@@ -375,13 +387,19 @@ lecture.main()
                 time.sleep(.02)
             self.assertTrue((self.out / 'paused').exists())
             checksum = file_hash(self.out / 'audio.wav')
+            status = processing_status.describe(self.out)
+            self.assertEqual((status['status'], status['stage']), ('running', 'frames'))
         finally:
             process.kill()
             process.communicate(timeout=5)
+        status = processing_status.describe(self.out)
+        self.assertEqual((status['status'], status['stage']), ('interrupted', 'frames'))
+        self.assertTrue(status['elapsed_is_last_observed'])
         result = subprocess.run([sys.executable, str(SCRIPTS / 'lecture.py'), str(self.video), '--output', str(self.out),
                     '--duration', '2', '--frame-every', '.5', '--prepare-only', '--resume'], capture_output=True, timeout=10)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(file_hash(self.out / 'audio.wav'), checksum)
+        self.assertEqual(processing_status.describe(self.out)['stage'], 'prepared')
 
     def test_parallel_course_preparation_registers_one_coherent_fragment(self):
         path = self.root / 'parallel-course'

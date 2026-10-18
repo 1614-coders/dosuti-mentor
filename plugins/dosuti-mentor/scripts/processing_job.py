@@ -36,10 +36,17 @@ def run_job(args, ffmpeg):
     out.mkdir(parents=True, exist_ok=True)
     with file_lock(out / '.processing.lock'):
         state = None
+        from processing_status import Reporter
+        report = Reporter(out)
+        report.set('verify')
         try:
-            state = process(args, ffmpeg, out)
+            state = process(args, ffmpeg, out, report.set)
+            terminal = ('complete' if state.get('status') == 'complete' else
+                        'recognized' if 'recognition' in state['stages'] else 'prepared')
+            report.set(terminal, 'complete')
             return state
-        except Exception as error:
+        except BaseException as error:
+            report.set(report.data['stage'], 'interrupted' if isinstance(error, (KeyboardInterrupt, SystemExit)) else 'failed', error)
             checkpoint = out / 'checkpoint.json'
             if checkpoint.is_file():
                 state = json.loads(checkpoint.read_text())
@@ -48,8 +55,8 @@ def run_job(args, ffmpeg):
             raise
 
 
-@verification_session(paths=lambda args, ffmpeg, out: [args.video] if CACHE_SOURCE_HASHES else [])
-def process(args, ffmpeg, out):
+@verification_session(paths=lambda args, ffmpeg, out, report=None: [args.video] if CACHE_SOURCE_HASHES else [])
+def process(args, ffmpeg, out, report=lambda stage: None):
     from cpu_policy import policy
     limits = policy(getattr(args, 'cpu_mode', 'standard'))
     extraction_options = dict(threads=limits['ffmpeg_threads']) if limits['ffmpeg_threads'] else {}
@@ -97,6 +104,7 @@ def process(args, ffmpeg, out):
         persist(out, state)
     stages = state['stages']
     if 'media' not in state:
+        report('probe')
         state['media'] = probe_media(args.video)
         persist(out, state)
     media = state['media']
@@ -104,6 +112,7 @@ def process(args, ffmpeg, out):
     if duration <= 0:
         raise ValueError('No video in requested interval')
     if 'audio' not in stages:
+        report('audio')
         print('Extracting audio…', flush=True)
         with span('audio', scope=out):
             temporary, quality = extract_audio(args.video.resolve(), out, args.start, duration, media, ffmpeg,
@@ -118,6 +127,7 @@ def process(args, ffmpeg, out):
     elif not (out / 'audio.wav').is_file() or file_hash(out / 'audio.wav') != stages['audio']['sha256']:
         raise ValueError('Prepared audio integrity changed; use course.py prepare --rebuild')
     if 'frames' not in stages:
+        report('frames')
         staging = out / '.frames-staging'
         if staging.exists():
             shutil.rmtree(staging)
@@ -163,6 +173,7 @@ def process(args, ffmpeg, out):
             if not (out / 'transcript.json').is_file() or file_hash(out / 'transcript.json') != previous['sha256']:
                 raise ValueError('Transcript integrity changed; use course.py prepare --rebuild')
         else:
+            report('model_load')
             import onnxruntime
             onnxruntime.disable_telemetry_events()
             from faster_whisper import WhisperModel
@@ -172,6 +183,7 @@ def process(args, ffmpeg, out):
                 from bounded_features import BoundedFeatureExtractor
                 model.feature_extractor = BoundedFeatureExtractor(model.feature_extractor)
     if not previous:
+        report('asr')
         with span('asr', scope=out):
             from pcm_audio import read_pcm
             audio = read_pcm(out / 'audio.wav')
@@ -218,6 +230,7 @@ def process(args, ffmpeg, out):
             raise ValueError('Packet integrity changed; use course.py prepare --rebuild')
         print(f'Reusing completed job: {out}', flush=True)
     else:
+        report('packet')
         atomic_json(out / 'manifest.json', metadata)
         from tutor_packet import build_packet
         build_packet(out)
