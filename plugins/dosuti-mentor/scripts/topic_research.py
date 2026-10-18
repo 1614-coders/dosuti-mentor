@@ -4,7 +4,7 @@ import hashlib
 import json
 from pathlib import Path
 from urllib.parse import urlsplit
-from atomic_files import atomic_json, atomic_text
+from atomic_files import atomic_bytes, atomic_json
 from profile_storage import checked
 from storage_lock import file_lock
 
@@ -156,7 +156,7 @@ def research(args):
                 for p in (parent,folder,folder/'snapshots'):p.mkdir(exist_ok=True);checked(p,True)
                 target=folder/value['snapshot'];checked(target)
                 if target.exists():snapshot(folder,value)
-                else:atomic_text(target,content);target.chmod(target.stat().st_mode & ~0o222)
+                else:atomic_bytes(target,raw);target.chmod(target.stat().st_mode & ~0o222)
             event=dict(revision=expected+1,at=course.now(),value=value);event['sha256']=digest(event)
             data=dict(schema=SCHEMA,revision=expected+1,events=data['events']+[event]);replay(data)
             if len(json.dumps(data,ensure_ascii=False,indent=2).encode())>900000:raise ValueError('Research history limit reached; preserve/export')

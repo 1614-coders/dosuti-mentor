@@ -1,4 +1,5 @@
 """Checkpointed processing in a private job folder, serialized by an OS lock."""
+from contextlib import nullcontext
 import json
 import os
 from pathlib import Path
@@ -7,7 +8,6 @@ import subprocess
 import uuid
 import wave
 from atomic_files import atomic_json, atomic_text
-from pilot_activity import span
 from model_readiness import inspect_model, model_lock
 from source_integrity import file_hash, source_matches, evidence_hashes, verify_evidence, verification_session
 from storage_lock import file_lock
@@ -122,7 +122,7 @@ def process(args, ffmpeg, out, report=lambda stage, **details: None):
     if 'audio' not in stages:
         report('audio')
         print('Extracting audio…', flush=True)
-        with span('audio', scope=out):
+        with nullcontext():
             temporary, quality = extract_audio(args.video.resolve(), out, args.start, duration, media, ffmpeg,
                 audio_track=inputs['audio_track'], audio_channel=inputs['audio_channel'], **extraction_options)
             pcm_duration(temporary)
@@ -141,7 +141,7 @@ def process(args, ffmpeg, out, report=lambda stage, **details: None):
             shutil.rmtree(staging)
         staging.mkdir()
         print('Extracting screen frames…', flush=True)
-        with span('frames', scope=out):
+        with nullcontext():
             frames=extract_frames(args.video,staging,args.start,stages['audio']['duration'],args.frame_every,ffmpeg, **extraction_options)
             if file_hash(args.video) != checksum:
                 raise ValueError('Video changed during extraction; use a fresh output directory')
@@ -186,13 +186,13 @@ def process(args, ffmpeg, out, report=lambda stage, **details: None):
             onnxruntime.disable_telemetry_events()
             from faster_whisper import WhisperModel
             print(f'Loading local model {model_path}…', flush=True)
-            with span('model_load', scope=out):
+            with nullcontext():
                 model = WhisperModel(str(model_path), device='cpu', compute_type='int8', cpu_threads=limits['asr_threads'])
                 from bounded_features import BoundedFeatureExtractor
                 model.feature_extractor = BoundedFeatureExtractor(model.feature_extractor)
     if not previous:
         report('asr')
-        with span('asr', scope=out):
+        with nullcontext():
             from pcm_audio import read_pcm
             audio = read_pcm(out / 'audio.wav')
             if metadata['audio_quality']['status'] in ('silent','no_audio_track'):

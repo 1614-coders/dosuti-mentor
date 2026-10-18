@@ -38,6 +38,12 @@ class Research(unittest.TestCase):
     def test_original_changes_do_not_rewrite_snapshot(self):
         self.save(self.request());self.save(self.capture());self.text.write_text('New');self.save(self.review())
         self.assertIn('keys',self.read()['sources'][0]['text'])
+
+    def test_capture_preserves_original_bytes(self):
+        raw='Строка 1\nLine 2\n'.encode('utf-8');self.text.write_bytes(raw)
+        self.save(self.request());result=self.save(self.capture())
+        snapshot=self.path.parent/result['sources'][0]['snapshot']
+        self.assertEqual(snapshot.read_bytes(),raw)
     def test_query_requires_reservation_and_enforces_budget(self):
         self.save(self.request(queries=1))
         with self.assertRaises(ValueError):self.save(self.capture(origin='search',query_id='q'))

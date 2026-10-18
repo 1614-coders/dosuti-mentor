@@ -2,6 +2,7 @@
 import json
 import os
 import hashlib
+from contextlib import nullcontext
 from pathlib import Path
 import shutil
 import subprocess
@@ -148,7 +149,6 @@ def run_site_download(command, timeout):
 def fetch_site(source, staging, fragments=4, timeout=1800, quality='best'):
     from download_planning import quality_format
     fmt = quality_format(quality)
-    import imageio_ffmpeg
     fragments, timeout = site_options(fragments, timeout)
     output = staging / 'completed.json'
     common = [sys.executable, '-m', 'yt_dlp', '--ignore-config', '--no-playlist',
@@ -172,6 +172,7 @@ def fetch_site(source, staging, fragments=4, timeout=1800, quality='best'):
         selected = info['entries'][0] if info.get('_type') in ('playlist', 'multi_video') else info
         size, kind = estimate(selected if isinstance(selected, dict) else {})
         ensure_download_space(staging, size, merge=True)
+        import imageio_ffmpeg
         run_site_download(common + ['--newline', '--progress', '--progress-delta', '5',
             '--concurrent-fragments', str(fragments), '--abort-on-unavailable-fragments', '--playlist-items', '1',
             '--format', fmt, '--fragment-retries', '3', '--match-filters', '!is_live',
@@ -224,8 +225,7 @@ def acquire(directory, video, fragments=4, site_timeout=1800, quality='best'):
         if site:
             record_download_status(assets, source, status='running',adapter='yt-dlp',fragments=fragments,timeout=site_timeout)
         try:
-            from pilot_activity import span
-            with span('download', scope=directory):
+            with nullcontext():
                 parsed = urlsplit(source)
                 if parsed.hostname in ('disk.yandex.ru', 'disk.yandex.com', 'yadi.sk'):
                     downloaded, adapter = fetch_yandex(source, staging)

@@ -1,9 +1,18 @@
 """Bounded OS file locks; the lock file must never be replaced or removed."""
 from contextlib import contextmanager
+from contextvars import ContextVar
 import errno
 import os
 from pathlib import Path
 import time
+
+
+_HELD_STREAMS = ContextVar('storage_lock_held_streams', default={})
+
+
+def locked_stream(path):
+    """Return this process's already locked stream for path, if any."""
+    return _HELD_STREAMS.get().get(str(Path(path).absolute()))
 
 
 @contextmanager
@@ -44,7 +53,9 @@ def file_lock(path, timeout=30, create_parent=True):
                 if time.monotonic() >= deadline:
                     raise TimeoutError(f'Course storage is busy: {path}') from error
                 time.sleep(0.05)
+        token = _HELD_STREAMS.set(_HELD_STREAMS.get() | {str(path.absolute()): stream})
         try:
-            yield
+            yield stream
         finally:
+            _HELD_STREAMS.reset(token)
             release()

@@ -60,7 +60,7 @@ def cleanup(args):
     import course
     root=course.root(args);course.read(root/'course.json')
     if root.is_relative_to(Path(__file__).resolve().parents[1]):raise ValueError('Cleanup must stay outside installed plugin')
-    from pilot_lifecycle import active
+    from course_lifecycle import active
     active(root)
     folder=profile_path(root,getattr(args,'profile','default'))
     apply=bool(getattr(args,'apply',False))

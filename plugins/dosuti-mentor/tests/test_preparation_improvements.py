@@ -135,25 +135,6 @@ except PreparationCancelled: sys.exit(130)
             self.assertEqual(result.stdout, 'ok\n')
         finally: REQUEST.reset(token)
 
-    def test_qa_cancel_does_not_wait_for_use_lock(self):
-        import pilot
-        from storage_lock import file_lock
-        qa = self.fixture.root / 'qa'
-        pilot.start(qa)
-        args = NS(**(vars(self.args) | dict(course=qa/'course')))
-        course.add_lesson(args)
-        @tracked
-        def prepare(args):
-            with file_lock(qa/'.pilot-use.lock'):
-                view = describe(qa/'course/lessons/one')
-                result = subprocess.run([sys.executable, str(fixtures.SCRIPTS/'course.py'), 'preparation-cancel',
-                    '--course', str(args.course), '--lesson', 'one', '--attempt', view['attempt_id']],
-                    capture_output=True, text=True, timeout=3)
-                self.assertEqual(result.returncode, 0, result.stderr)
-                self.assertTrue(json.loads(result.stdout)['requested'])
-            phase('publish')
-        with self.assertRaises(PreparationCancelled): prepare(args)
-
     def test_cancel_cannot_recreate_deleted_attempt(self):
         import preparation_status
         # Recreate the journal for the decorator's final report only after checking cancel.

@@ -13,7 +13,7 @@ function Assert-DoSutiPath([string]$Path) {
 
 function Initialize-DoSutiHome([string]$HomePath) {
     Assert-DoSutiPath $HomePath
-    if (Test-Path -LiteralPath (Join-Path $HomePath '.cleanup-pending.json')) { throw 'Cleanup is pending; resume it before starting setup.' }
+    if (Test-Path -LiteralPath (Join-Path $HomePath '.cleanup-pending.json')) { throw 'A legacy cleanup marker was found. Preserve this folder and choose a new empty DoSuti data folder.' }
     $full = [IO.Path]::GetFullPath($HomePath).TrimEnd([IO.Path]::DirectorySeparatorChar)
     if ($full -eq [IO.Path]::GetPathRoot($full).TrimEnd([IO.Path]::DirectorySeparatorChar) -or $full -eq $env:USERPROFILE) {
         throw 'Choose a dedicated DoSuti data folder.'
@@ -25,16 +25,12 @@ function Initialize-DoSutiHome([string]$HomePath) {
         if ($data.schema -ne 'dosuti_home_v1' -or $data.id -notmatch '^[a-f0-9]{32}$') { throw 'Invalid home marker.' }
     } else {
         if ((Test-Path -LiteralPath $full) -and @(Get-ChildItem -LiteralPath $full -Force).Count) {
-            $legacy = Join-Path $full 'setup.json'
-            if (-not (Test-Path -LiteralPath $legacy)) { throw 'Existing folder is not managed; choose an empty folder.' }
-            Assert-DoSutiPath $legacy
-            $old = Get-Content -LiteralPath $legacy -Raw | ConvertFrom-Json
-            if ($old.schema -ne 'pilot_setup_v1' -or $old.test_only -ne $true -or -not $old.owner) { throw 'Invalid legacy setup.' }
+            throw 'Existing folder is not managed; choose an empty folder.'
         }
         [IO.Directory]::CreateDirectory($full) | Out-Null
         @{schema='dosuti_home_v1';id=[guid]::NewGuid().ToString('N')} | ConvertTo-Json | Set-Content -LiteralPath $marker -Encoding UTF8
     }
-    foreach ($child in @('runtime','cache','temp','reports')) {
+    foreach ($child in @('runtime','cache','temp')) {
         $path = Join-Path $full $child
         Assert-DoSutiPath $path
         [IO.Directory]::CreateDirectory($path) | Out-Null

@@ -13,33 +13,33 @@ from storage_lock import file_lock
 
 def install(runtime):
     target = safe(runtime / 'venv')
-    backup = None
+    if Path(sys.prefix).resolve() == target:
+        raise ValueError('Run repair with the base Python, outside this venv')
     if target.exists():
         config = safe(target / 'pyvenv.cfg')
         if not config.is_file(): raise ValueError('Unknown venv folder; preserve it before repair')
-        fields = dict((k.strip(), v.strip()) for line in config.read_text().splitlines()
-                      if '=' in line for k, v in [line.split('=', 1)])
-        base = Path(getattr(sys, '_base_executable', sys.executable)).resolve().parent
-        if (Path(fields.get('home', '')).resolve() != base or
-                fields.get('version', '').split('.')[:2] != [str(v) for v in sys.version_info[:2]]):
-            if Path(sys.prefix).resolve() == target: raise ValueError('Run repair with the base Python, outside this venv')
-            backup = runtime / ('venv-previous-' + uuid.uuid4().hex)
-            target.rename(backup)
+    staging = safe(runtime / ('venv-staging-' + uuid.uuid4().hex))
+    backup = None
     try:
-        venv.EnvBuilder(with_pip=True).create(target)
-        python = target / ('Scripts/python.exe' if sys.platform == 'win32' else 'bin/python')
+        venv.EnvBuilder(with_pip=True).create(staging)
+        python = staging / ('Scripts/python.exe' if sys.platform == 'win32' else 'bin/python')
         cache = os.environ.get('PIP_CACHE_DIR', str(runtime / 'cache/pip'))
         subprocess.run([str(python), '-m', 'pip', '--isolated', 'install', '--disable-pip-version-check',
                         '--cache-dir', cache,
                         '--only-binary=:all:', '-r', str(Path(__file__).with_name('requirements.txt'))],
                        env=dict(os.environ, PIP_CONFIG_FILE=os.devnull), check=True)
+        if target.exists():
+            backup = runtime / ('venv-previous-' + uuid.uuid4().hex)
+            target.rename(backup)
+        try: staging.rename(target)
+        except BaseException:
+            if backup is not None: backup.rename(target)
+            raise
     except BaseException:
-        if backup is not None:
-            if target.exists(): shutil.rmtree(target)
-            backup.rename(target)
+        if staging.exists(): shutil.rmtree(staging)
         raise
     if backup is not None: shutil.rmtree(backup)
-    return python
+    return target / ('Scripts/python.exe' if sys.platform == 'win32' else 'bin/python')
 
 
 def main():

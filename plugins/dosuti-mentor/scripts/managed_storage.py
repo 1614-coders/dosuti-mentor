@@ -30,7 +30,7 @@ def safe(path):
 
 def validate(home):
     home = safe(home)
-    from pilot_lifecycle import active
+    from course_lifecycle import active
     active(home)
     marker = safe(home / MARKER)
     if marker.stat().st_size > 4096:
@@ -49,11 +49,7 @@ def initialize(home, legacy_runtime=False):
     if (home / MARKER).exists():
         return validate(home)
     if home.exists() and any(home.iterdir()):
-        setup = home / 'setup.json'
-        if setup.exists():
-            from pilot_setup import read
-            read(home)
-        elif not (legacy_runtime and (home / 'venv/pyvenv.cfg').is_file()):
+        if not (legacy_runtime and (home / 'venv/pyvenv.cfg').is_file()):
             raise ValueError('Existing folder is not managed; choose an empty folder')
     home.mkdir(parents=True, exist_ok=True)
     atomic_json(home / MARKER, dict(schema='dosuti_home_v1', id=uuid.uuid4().hex))

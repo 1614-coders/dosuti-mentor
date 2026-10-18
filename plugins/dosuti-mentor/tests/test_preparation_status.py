@@ -39,17 +39,6 @@ class PreparationStatus(unittest.TestCase):
         self.assertEqual(result.returncode,0,result.stderr)
         self.assertEqual(json.loads(result.stdout),{'status':'unavailable'})
 
-    def test_live_status_does_not_wait_for_exclusive_qa_operation(self):
-        import pilot
-        qa=self.root/'qa';pilot.start(qa)
-        args=NS(**(vars(self.args)|{'course':qa/'course'}))
-        course.add_lesson(args)
-        with file_lock(qa/'.pilot-use.lock'):
-            result=subprocess.run([sys.executable,str(SCRIPTS/'course.py'),'preparation-status',
-                '--course',str(args.course),'--lesson','one'],capture_output=True,text=True,timeout=3)
-        self.assertEqual(result.returncode,0,result.stderr)
-        self.assertEqual(json.loads(result.stdout)['status'],'unavailable')
-
     def test_download_error_then_retry_never_claims_teaching_ready(self):
         seen=[]
         @tracked

@@ -46,6 +46,18 @@ class RuntimeRepair(unittest.TestCase):
         self.assertEqual((self.target / 'pyvenv.cfg').read_bytes(), before)
         self.assertEqual((self.target / 'old-extension.pyd').read_bytes(), b'old ABI')
 
+    def test_same_python_failure_keeps_previous_environment(self):
+        self.target.mkdir()
+        base = Path(getattr(sys, '_base_executable', sys.executable)).resolve().parent
+        (self.target / 'pyvenv.cfg').write_text(f'home = {base}\nversion = {sys.version_info.major}.{sys.version_info.minor}.0\n')
+        (self.target / 'old-extension.pyd').write_bytes(b'old ABI')
+        with patch.object(setup_local.venv, 'EnvBuilder') as builder, \
+                patch.object(setup_local.subprocess, 'run', side_effect=subprocess.CalledProcessError(1, 'pip')):
+            builder.return_value.create.side_effect = self.create
+            with self.assertRaises(subprocess.CalledProcessError): setup_local.install(self.root)
+        self.assertEqual((self.target / 'old-extension.pyd').read_bytes(), b'old ABI')
+        self.assertFalse(list(self.root.glob('venv-staging-*')))
+
     def test_unknown_directory_is_preserved(self):
         self.target.mkdir(); (self.target / 'user-file').write_text('keep')
         with self.assertRaises(ValueError): setup_local.install(self.root)

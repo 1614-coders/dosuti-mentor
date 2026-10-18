@@ -33,11 +33,11 @@ class WindowsRuntime(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         return result.stdout
 
-    def test_both_scripts_parse(self):
-        self.run_ps("$e=$null; foreach($file in @('Windows-Runtime.ps1','Start-WindowsPilot.ps1','Complete-WindowsPilot.ps1')) { "
-                    "$path=Join-Path " + "'" + str(PACKAGE) + "'" + " $file; "
-                    "[Management.Automation.Language.Parser]::ParseFile($path,[ref]$null,[ref]$e) | Out-Null; "
-                    "if($e.Count) {throw ($e | Out-String)} }")
+    def test_install_script_parses(self):
+        path = PACKAGE / 'Install-DoSuti.ps1'
+        self.run_ps("$e=$null; [Management.Automation.Language.Parser]::ParseFile('" +
+                    str(path).replace("'", "''") + "',[ref]$null,[ref]$e) | Out-Null; " +
+                    "if($e.Count) {throw ($e | Out-String)}")
 
     def test_existing_python_avoids_download(self):
         output = self.run_ps("""
@@ -90,6 +90,8 @@ catch { if($_.Exception.Message -notmatch 'disabled in offline') {throw} }
         marker = json.loads((self.home / '.dosuti-home.json').read_text(encoding='utf-8-sig'))
         self.assertEqual(marker['schema'], 'dosuti_home_v1')
         self.assertEqual(len(marker['id']), 32)
+        self.assertEqual({path.name for path in self.home.iterdir()},
+                         {'.dosuti-home.json', 'runtime', 'cache', 'temp'})
 
     def test_corrupt_archive_is_rejected_and_partial_removed(self):
         self.run_ps("""
@@ -135,32 +137,6 @@ function Repair-DoSutiPython {throw 'unverified original preserved for repair'}
 try {Resolve-DoSutiPython $homePath '' ([pscustomobject]@{python_exe_sha256=('0'*64)}); throw 'unexpected success'}
 catch {if($_.Exception.Message -notmatch 'preserved for repair') {throw}}
 """)
-
-    def test_frontend_passes_selected_python_and_private_environment_to_worker(self):
-        package = self.base / 'package'; package.mkdir()
-        shutil.copyfile(PACKAGE / 'Start-WindowsPilot.ps1', package / 'Start-WindowsPilot.ps1')
-        helper = (PACKAGE / 'Windows-Runtime.ps1').read_text()
-        helper += "\nfunction Resolve-DoSutiPython { [pscustomobject]@{executable='" + str(sys.executable).replace("'", "''") + "';owned=$false;version='host-fixture'} }\n"
-        (package / 'Windows-Runtime.ps1').write_text(helper)
-        scripts = package / 'plugins/dosuti-mentor/scripts'; scripts.mkdir(parents=True)
-        refs = scripts.parent / 'references'; refs.mkdir()
-        shutil.copyfile(PACKAGE / 'plugins/dosuti-mentor/references/windows-python.json', refs / 'windows-python.json')
-        (scripts / 'pilot_setup.py').write_text('''import sys,os,json
-from pathlib import Path
-root=Path(sys.argv[sys.argv.index('--root')+1])
-(root/'reports/captured.json').write_text(json.dumps(dict(args=sys.argv,home=os.environ['DOSUTI_HOME'],temp=os.environ['TEMP'])))
-print(json.dumps(dict(status='passed')))
-''')
-        (scripts / 'managed_storage.py').write_text("print('{\"applied\": true}')\n")
-        self.run_ps("$env:OS='Windows_NT'; $env:PROCESSOR_ARCHITECTURE='AMD64'; & '" +
-                    str(package / 'Start-WindowsPilot.ps1').replace("'", "''") +
-                    "' -Video 'fixture.mp4' -PilotRoot $homePath -CpuMode economy")
-        captured = json.loads((self.home / 'reports/captured.json').read_text())
-        self.assertEqual(Path(captured['home']), self.home)
-        self.assertTrue(Path(captured['temp']).is_relative_to(self.home / 'temp'))
-        self.assertIn('economy', captured['args'])
-        self.assertFalse(list((self.home / 'temp').iterdir()))
-        self.assertTrue(json.loads((self.home / 'reports/cache-maintenance.json').read_text(encoding='utf-8-sig'))['applied'])
 
     def test_private_repair_keeps_backup_and_never_executes_old_copy(self):
         self.run_ps("""
@@ -231,6 +207,6 @@ Initialize-DoSutiHome $homePath | Out-Null
 @{seal='fixture';owner='fixture'} | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $homePath '.cleanup-pending.json')
 Remove-Item -LiteralPath (Join-Path $homePath 'runtime') -Recurse
 try {Initialize-DoSutiHome $homePath;throw 'unexpected success'}
-catch {if($_.Exception.Message -notmatch 'Cleanup is pending') {throw}}
+catch {if($_.Exception.Message -notmatch 'legacy cleanup marker') {throw}}
 if(Test-Path -LiteralPath (Join-Path $homePath 'runtime')) {throw 'setup recreated files during cleanup'}
 """)

@@ -910,9 +910,9 @@ def main():
     args = parser.parse_args()
     try:
         if args.command in ('preparation-status', 'preparation-cancel'):
-            # Observe a live QA operation without taking its exclusive use lock
+            # Observe a live preparation operation without taking its exclusive use lock
             # or creating a managed runtime/temp session.
-            from pilot_lifecycle import active
+            from course_lifecycle import active
             directory = root(args)
             if directory.name == 'course': active(directory.parent)
             if args.command == 'preparation-status': preparation_status(args)
@@ -920,10 +920,9 @@ def main():
                 from preparation_status import cancel
                 print(json.dumps(cancel(args), ensure_ascii=False, indent=2))
             return
-        from pilot_activity import course_scope
         scope = getattr(args, 'course', None)
         home = find_home(scope) if scope is not None and args.command != 'prepare' else None
-        with course_scope(scope, args.command), session(home):
+        with session(home):
             if args.command == 'preparation-summary':
                 from preparation_summary import summarize
                 print(json.dumps(summarize(lesson_path(args)), ensure_ascii=False, indent=2))
