@@ -117,7 +117,8 @@ def study_next(args):
         for action in result['next_actions']:
             suggestions.append(dict(unit=unit['id'],unit_sha256=unit['content_sha256'],prerequisites=unit['prerequisites'],**action))
     suggestions.sort(key=lambda r:(r['priority'],r['unit'],r['criterion']))
-    return dict(valid=True,profile=getattr(args,'profile','default'),session=session,journal_revision=journal['revision'],as_of=now,learning_intent=intent(args),
+    intent_view=intent(args)
+    return dict(valid=True,profile=getattr(args,'profile','default'),session=session,journal_revision=journal['revision'],as_of=now,learning_intent=intent_view,learning_progress=intent_view['learning_progress'],
                 recommendations=suggestions[:limit],recommendation_count=len(suggestions),truncated=len(suggestions)>limit,
                 blocked=blocked[:limit],blocked_count=len(blocked),continuations=continuations[:limit],continuation_count=len(continuations),
                 policy=policy(),verification='read_only_suggestions_not_automatic_curriculum_or_grading')

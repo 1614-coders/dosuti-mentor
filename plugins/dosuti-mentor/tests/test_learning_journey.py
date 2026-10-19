@@ -166,6 +166,144 @@ class LearningJourney(unittest.TestCase):
         self.assertEqual(diagnostic.view(self.args())['current']['answers'], [])
         self.assertFalse((self.fixture.path / 'learners/journey/unit-learning.json').exists())
 
+    def test_shared_progress_uses_diagnostic_results_and_advances_accepted_route(self):
+        self.diagnose(dict(action='accept', competences=['Explain assignment', 'Trace loop'],
+                           next_difficulty='basic'))
+        first = self.diagnose(dict(action='prompt', competence='Explain assignment',
+                                  prompt='What is assigned to x?', difficulty='basic', format='open'))
+        self.diagnose(dict(action='answer', prompt_revision=first['current']['pending_prompt']['revision'],
+                           answer='I do not know', evaluation='Cannot explain assignment', evidence='unknown',
+                           next_difficulty='basic', next_competence='Trace loop',
+                           selection_reason='Assignment is an identified gap'))
+        second = self.diagnose(dict(action='prompt', competence='Trace loop',
+                                   prompt='How many iterations?', difficulty='basic', format='open'))
+        diagnostic = self.diagnose(dict(action='answer', prompt_revision=second['current']['pending_prompt']['revision'],
+                                       answer='Two', evaluation='Correct trace', evidence='confirmed',
+                                       next_difficulty='applied', next_competence=None,
+                                       selection_reason='Enough evidence for this diagnostic'))
+        self.diagnose(dict(action='complete'))
+
+        card = dict(id='example', title='Assignment example', summary='Read one assignment',
+                    objectives=['Read the assigned value'], criteria=['Explain a new assignment independently'],
+                    prerequisites=[], uncertainties=[], sources=[dict(kind='video', role='teacher',
+                    notes='Synthetic prepared transcript and sampled frame', lesson='lesson-01', start=0, end=60)])
+        study_units.unit(self.args(unit_file=self.write('unit-input.json', card), expected_revision=0))
+        answer_revisions = [answer['revision'] for answer in diagnostic['current']['answers']]
+        self.decide(dict(goal=dict(description='Read and explain simple assignments')))
+        self.decide(dict(proposal=dict(summary='Close assignment gap, then transfer it',
+            steps=['Practice assignments', 'Transfer assignment knowledge'], step_bases=[
+                dict(unit_ids=['example'], diagnostic_event_revisions=[answer_revisions[0]]),
+                dict(prerequisites=[1], diagnostic_event_revisions=[answer_revisions[1]])])))
+        self.decide(dict(accept_proposal=True))
+
+        before = intent.view(self.args(session='chat-a'))['learning_progress']
+        self.assertEqual(before['next_step']['title'], 'Practice assignments')
+        self.assertEqual(before['next_step']['diagnostic_guidance'], 'address_identified_gap')
+        self.assertEqual(before['diagnostic']['identified_gaps'], ['Explain assignment'])
+        self.assertEqual(before['demonstrated_units'], [])
+
+        self.learn(dict(stage='solved_independently', details='Correct on a new assignment',
+                        question='What is y after int y = 2?', answer='y is 2', hints=0, criteria=[1]))
+        after = intent.view(self.args(session='chat-b'))['learning_progress']
+        self.assertEqual(after['completed_steps'], [1])
+        self.assertEqual(after['next_step']['title'], 'Transfer assignment knowledge')
+        self.assertEqual(after['demonstrated_units'], ['example'])
+
+        unit_view = unit_learning.learn_unit(self.args(unit_id='example', session='chat-b'))
+        self.assertEqual(unit_view['learning_progress'], after)
+        self.assertEqual(learning.resume(self.args(session='chat-b'))['learning_progress'], after)
+        stream = __import__('io').StringIO()
+        with __import__('contextlib').redirect_stdout(stream):
+            course.status(self.args(session='chat-b'))
+        self.assertEqual(json.loads(stream.getvalue())['learning_progress'], after)
+        stream = __import__('io').StringIO()
+        legacy_args = NS(**(vars(self.args(session='chat-b')) | dict(
+            lesson='lesson-01', topic='Legacy lesson note', stage='explained', details='Explained source')))
+        with __import__('contextlib').redirect_stdout(stream):
+            course.progress(legacy_args)
+        self.assertEqual(json.loads(stream.getvalue())['learning_progress'], after)
+
+    def test_acceptance_cycle_ten_questions_route_handoff_and_safe_cleanup(self):
+        answers = dict(outcome=['profession'], subject='Java backend', self_assessment='basics',
+                       learning_format='step_by_step', assistant_role='mentor', check_frequency='adaptive',
+                       explanation_detail='detailed', constraints=dict(selected=['study_time'], details='Three evenings'))
+        self.assertEqual(self.settings(onboarding_file=self.write('onboarding-input.json', dict(answers=answers)))['onboarding'], 'complete')
+        competences = ['Read assignment', 'Trace condition', 'Explain loop', 'Use a map', 'Read stacktrace',
+                       'Write method', 'Test boundary', 'Find null bug', 'Explain OOP', 'Connect HTTP handler']
+        self.diagnose(dict(action='accept', competences=competences, next_difficulty='basic'))
+        answer_revisions = {}
+        difficulty = 'basic'
+        for index, competence in enumerate(competences):
+            prompted = self.diagnose(dict(action='prompt', competence=competence,
+                                          prompt='QA question for ' + competence, difficulty=difficulty, format='open'))
+            if index == 4:
+                skipped = self.diagnose(dict(action='skip', prompt_revision=prompted['current']['pending_prompt']['revision'],
+                                              skip_reason='No time in this session', next_difficulty='basic',
+                                              next_competence=competences[index + 1],
+                                              selection_reason='Continue with another remaining competence'))
+                self.assertEqual(len(skipped['current']['answers']), 4)
+                difficulty = 'basic'
+                continue
+            evidence = 'unknown' if index in (1, 7) else ('needs_practice' if index == 2 else 'confirmed')
+            difficulty = 'basic' if evidence == 'unknown' else ('transfer' if index in (3, 8) else 'applied')
+            next_competence = competences[index + 1] if index + 1 < len(competences) else None
+            diagnosed = self.diagnose(dict(action='answer', prompt_revision=prompted['current']['pending_prompt']['revision'],
+                                            answer='QA answer ' + str(index), evaluation='QA evaluation ' + evidence,
+                                            evidence=evidence, next_difficulty=difficulty, next_competence=next_competence,
+                                            selection_reason='QA adaptive choice from recorded answer'))
+            answer_revisions[competence] = diagnosed['revision']
+            if index == 2:
+                self.assertEqual(self.diagnose(dict(action='pause'))['status'], 'paused')
+                self.assertEqual(self.diagnose(dict(action='resume'))['status'], 'accepted')
+        finished = self.diagnose(dict(action='complete'))
+        summary = finished['summary']
+        self.assertEqual(len(finished['current']['answers']), 9)
+        self.assertEqual(summary['identified_gaps'], ['Trace condition', 'Find null bug'])
+        self.assertEqual(summary['unverified_areas'], ['Read stacktrace'])
+        self.assertEqual(summary['skipped_questions'][0]['skip_reason'], 'No time in this session')
+
+        card = dict(id='example', title='Assignment example', summary='Read one assignment',
+                    objectives=['Read the assigned value'], criteria=['Explain a new assignment independently'],
+                    prerequisites=[], uncertainties=[], sources=[dict(kind='video', role='teacher',
+                    notes='Synthetic prepared transcript and sampled frame', lesson='lesson-01', start=0, end=60)])
+        study_units.unit(self.args(unit_file=self.write('unit-input.json', card), expected_revision=0))
+        self.assertEqual(material_status.view(self.args(unit_id='example', lesson=None))['material']['status'], 'ready')
+        self.decide(dict(goal=dict(description='Become a Java backend developer', purpose='First internship')))
+        self.decide(dict(proposal=dict(summary='Close the observed gap, then use it in a transfer task',
+            steps=['Practice assignment basics', 'Use the result in a transfer task'], step_bases=[
+                dict(unit_ids=['example'], diagnostic_event_revisions=[answer_revisions['Trace condition']]),
+                dict(prerequisites=[1], diagnostic_event_revisions=[answer_revisions['Read assignment']])])))
+        accepted = self.decide(dict(accept_proposal=True))
+        self.assertEqual(accepted['plan']['route_state'], 'accepted')
+        before = accepted['learning_progress']
+        self.assertEqual(before['next_step']['diagnostic_guidance'], 'address_identified_gap')
+
+        checkpoint = dict(recap='Prepared assignment material', next_step='Solve transfer task', pending_question='What is y?')
+        self.learn(checkpoint, checkpoint=True)
+        self.learn(dict(stage='explained', details='Explained prepared source', question=None, answer=None, hints=0, criteria=[]))
+        self.learn(dict(stage='solved_independently', details='Solved new transfer task', question='What is y?',
+                        answer='y is 2', hints=0, criteria=[1]))
+        other_chat = unit_learning.learn_unit(self.args(unit_id='example', session='chat-b', history_limit=20))
+        self.assertTrue(other_chat['learning']['all_criteria_demonstrated'])
+        self.assertEqual(other_chat['learning_progress']['completed_steps'], [1])
+        self.assertEqual(other_chat['learning_progress']['next_step']['title'], 'Use the result in a transfer task')
+        self.assertEqual(unit_learning.learn_unit(self.args(unit_id='example', session='chat-a'))['learning']['checkpoint']['event']['value'], checkpoint)
+        self.assertEqual(__import__('adaptive_learning').study_next(self.args(session='chat-b', limit=5))['learning_progress'], other_chat['learning_progress'])
+
+        preserved = [learning.pref_file(self.args(), 'profile'), diagnostic.path_for(self.args()),
+                     intent.path_for(self.args()), self.fixture.path / 'learners/journey/unit-learning.json']
+        before_cleanup = {path: path.read_bytes() for path in preserved}
+        compact.apply(self.media.directory, self.media.plan())
+        with patch.object(course, 'download_video', side_effect=AssertionError('Unexpected download')), \
+             patch.object(course, 'prepare', side_effect=AssertionError('Unexpected preparation')):
+            self.assertTrue(unit_learning.learn_unit(self.args(unit_id='example', session='chat-b'))['learning']['all_criteria_demonstrated'])
+        self.assertEqual({path: path.read_bytes() for path in preserved}, before_cleanup)
+
+        changed = self.decide(dict(goal=dict(description='Build a desktop Java application')))
+        self.assertTrue(changed['plan']['needs_review'])
+        self.assertIsNone(changed['learning_progress']['next_step'])
+        self.assertEqual(diagnostic.view(self.args())['summary'], summary)
+
 
 if __name__ == '__main__':
     unittest.main()

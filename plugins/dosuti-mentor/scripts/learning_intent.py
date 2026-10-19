@@ -110,6 +110,73 @@ def basis_status(args,plan):
     return dict(valid=not reasons,needs_review=bool(reasons),reasons=reasons,diagnostic_evidence=answers)
 
 
+def learning_progress(args, intent):
+    """Read existing journals into one learner-facing route summary; never writes."""
+    import course,diagnostic_learning,study_units,unit_learning
+    diagnostic=diagnostic_learning.view(args)
+    summary=diagnostic.get('summary') if diagnostic.get('valid') else None
+    result=dict(valid=True, route_state=(intent['plan'] or {}).get('route_state','none'),
+                diagnostic=dict(status=diagnostic.get('status'),
+                                confirmed_knowledge=(summary or {}).get('confirmed_knowledge',[]),
+                                partially_confirmed_knowledge=(summary or {}).get('partially_confirmed_knowledge',[]),
+                                identified_gaps=(summary or {}).get('identified_gaps',[]),
+                                unverified_areas=(summary or {}).get('unverified_areas',[]),
+                                recommended_start=(summary or {}).get('recommended_start')),
+                studied_units=[], demonstrated_units=[], unit_gaps=[],
+                completed_steps=[], current_step=None, next_step=None, stopped_at=None,
+                limitations=['recorded_evidence_not_automatic_grading'])
+    if not diagnostic.get('valid'):
+        result.update(valid=False, reason='diagnostic: '+diagnostic['reason']);return result
+    plan=intent['plan']
+    if plan is None or plan['needs_review']:
+        return result
+    try:
+        root=course.root(args);registry=study_units.load(root,include_history=False)
+        units=study_units.checked_units(root,registry,include_contexts=False)
+        from learning_tools import learner
+        journal=unit_learning.load(learner(args)/'unit-learning.json',compact=True)
+        states={}
+        for name,unit in units.items():
+            view=unit_learning.view(args,unit,journal)
+            from adaptive_learning import recommendations
+            adaptive=recommendations(unit,journal,course.now())
+            current=not unit['stale'] and view['all_criteria_demonstrated'] and all(row['time_valid'] for row in adaptive['criteria'])
+            states[name]=dict(studied=bool(view['attempt_count'] or view['explanation_count']),demonstrated=current,
+                              criteria=view['criteria'],checkpoint=view['checkpoint'])
+            if states[name]['studied']:result['studied_units'].append(name)
+            if current:result['demonstrated_units'].append(name)
+            for criterion,state in view['criteria'].items():
+                if state in ('needs_review','practice_with_help'):
+                    result['unit_gaps'].append(dict(unit=name,criterion=int(criterion),state=state))
+            checkpoint=view['checkpoint'].get('event')
+            if view['checkpoint']['valid'] and (result['stopped_at'] is None or checkpoint['revision'] > result['stopped_at']['revision']):
+                result['stopped_at']=dict(unit=name,revision=checkpoint['revision'],checkpoint=checkpoint['value'])
+    except (ValueError,OSError) as error:
+        result.update(valid=False,reason='unit learning: '+str(error));return result
+    answers={answer['revision']:answer for attempt in diagnostic.get('attempts',[])
+             for answer in attempt['answers']}
+    steps=[]
+    for index,title in enumerate(plan['steps'],1):
+        basis=(plan.get('step_bases') or [{} for _ in plan['steps']])[index-1]
+        prerequisites=basis.get('prerequisites',[]);unit_ids=basis.get('unit_ids',[])
+        findings=[answers[revision]['evidence'] for revision in basis.get('diagnostic_event_revisions',[]) if revision in answers]
+        guidance=('address_identified_gap' if 'unknown' in findings else
+                  'practice_partially_confirmed' if 'needs_practice' in findings else
+                  'confirm_transfer' if 'confirmed' in findings else 'no_diagnostic_evidence')
+        completed=bool(unit_ids) and all(states.get(name,{}).get('demonstrated') for name in unit_ids)
+        steps.append(dict(index=index,title=title,unit_ids=unit_ids,prerequisites=prerequisites,
+                          diagnostic_guidance=guidance,completed=completed))
+    for step in steps:
+        if step['completed']:
+            result['completed_steps'].append(step['index']);continue
+        if any(not steps[number-1]['completed'] for number in step['prerequisites']):
+            continue
+        result['current_step']=step
+        result['next_step']=step
+        break
+    return result
+
+
 def apply(state, event):
     value=patch_value(event['changes'],event['session']); rev=event['revision']
     if 'learning_context' in value:
@@ -208,11 +275,13 @@ def view(args):
     if task is not None:
         task['needs_review']=(task['goal_revision']!=state['goal_revision'] or
                               task['plan_revision']!=current_plan_revision(state) or bool(plan_view and task['plan_revision']==plan_view['accepted_revision'] and plan_view['needs_review']))
-    return dict(valid=True,revision=journal['revision'],goal=state['goal'],goal_revision=state['goal_revision'],
+    result=dict(valid=True,revision=journal['revision'],goal=state['goal'],goal_revision=state['goal_revision'],
                 learning_context=state['learning_context'],
                 plan=plan_view,proposal=proposal_view,session=session,session_task=task,
                 session_count=len(state['sessions']),event_count=len(journal['events']),
                 history=journal['events'][-limit:] if limit else [])
+    result['learning_progress']=learning_progress(args,result)
+    return result
 
 
 def commit(args,changes,sources_locked=False):

@@ -22,13 +22,16 @@ def validate(value, *, new=False):
         'accept': {'competences', 'next_difficulty'}, 'decline': set(),
         'prompt': {'competence', 'prompt', 'difficulty'},
         'answer': {'prompt_revision', 'answer', 'evaluation', 'evidence', 'next_difficulty'},
+        'skip': {'prompt_revision', 'next_difficulty', 'next_competence', 'selection_reason'},
         'pause': set(), 'resume': set(), 'complete': set(),
     }
     extensions = {'prompt': {'format'}, 'answer': {'next_competence', 'selection_reason'}}
+    optional = {'skip': {'skip_reason'}}
     required = fields.get(action, set()) | {'action'}
     extra = extensions.get(action, set())
-    if (action not in fields or not required <= set(value) or set(value) - required - extra
-            or (new and not extra <= set(value))
+    allowed = required | extra | optional.get(action, set())
+    if (action not in fields or not required <= set(value) or set(value) - allowed
+            or (new and action in extensions and not extra <= set(value))
             or (action == 'answer' and bool(set(value) & extra) and not extra <= set(value))):
         raise ValueError('Invalid diagnostic action fields')
     if action == 'accept':
@@ -53,6 +56,14 @@ def validate(value, *, new=False):
             text(value['selection_reason'], 'Concrete reason for next competence')
         if not isinstance(value['evidence'], str) or value['evidence'] not in EVIDENCE:
             raise ValueError('Evidence must be confirmed, needs_practice or unknown')
+    if action == 'skip':
+        if type(value['prompt_revision']) is not int or value['prompt_revision'] < 1:
+            raise ValueError('Skip requires prompt revision')
+        if value['next_competence'] is not None:
+            text(value['next_competence'], 'Next competence', 1000)
+        text(value['selection_reason'], 'Concrete reason for next competence')
+        if 'skip_reason' in value and value['skip_reason'] is not None:
+            text(value['skip_reason'], 'Skip reason')
     for field in ('difficulty', 'next_difficulty'):
         if field in value and (not isinstance(value[field], str) or value[field] not in DIFFICULTIES):
             raise ValueError('Difficulty must be basic, applied or transfer')
@@ -104,6 +115,24 @@ def apply(attempts, event):
                 if 'next_competence' in value:
                     current['next_competence'] = value['next_competence']
                     current['selection_reason'] = value['selection_reason']
+            elif action == 'skip':
+                prompt = current['pending_prompt']
+                if prompt is None or prompt['revision'] != value['prompt_revision']:
+                    raise ValueError('Skip must reference the pending prompt')
+                if (value['next_competence'] is not None
+                        and value['next_competence'] not in current['competences']):
+                    raise ValueError('Unknown next diagnostic competence')
+                if value['next_competence'] == prompt['competence']:
+                    raise ValueError('Skip must continue with another competence or complete')
+                current.setdefault('skips', []).append(dict(revision=event['revision'],
+                    competence=prompt['competence'], prompt=prompt['prompt'],
+                    difficulty=prompt['difficulty'],
+                    **({'format': prompt['format']} if 'format' in prompt else {}),
+                    skip_reason=value.get('skip_reason')))
+                current['pending_prompt'] = None
+                current['next_difficulty'] = value['next_difficulty']
+                current['next_competence'] = value['next_competence']
+                current['selection_reason'] = value['selection_reason']
     current['last_action'] = action
     current['revision'] = event['revision']
 
@@ -139,6 +168,44 @@ def path_for(args):
     return path
 
 
+def summary(current):
+    if current is None:
+        return None
+    if not current['competences']:
+        return dict(checked_competences=[], confirmed_knowledge=[],
+                    partially_confirmed_knowledge=[], identified_gaps=[],
+                    unverified_areas=[], skipped_questions=[],
+                    recommended_start=dict(competence=None, basis='diagnostic_declined'),
+                    limitations=['diagnostic_was_not_completed',
+                                 'assistant_recorded_evidence_not_automatic_grading'])
+    latest = {answer['competence']: answer for answer in current['answers']}
+    groups = {name: [] for name in EVIDENCE}
+    for competence in current['competences']:
+        answer = latest.get(competence)
+        if answer is not None:
+            groups[answer['evidence']].append(competence)
+    unverified = [name for name in current['competences'] if name not in latest]
+    if groups['unknown']:
+        start = dict(competence=groups['unknown'][0], basis='identified_gap')
+    elif groups['needs_practice']:
+        start = dict(competence=groups['needs_practice'][0], basis='partial_confirmation')
+    elif unverified:
+        start = dict(competence=unverified[0], basis='unverified')
+    else:
+        start = dict(competence=current['competences'][0], basis='confirm_with_transfer_task')
+    limitations = ['assistant_recorded_evidence_not_automatic_grading',
+                   'unverified_areas_are_not_treated_as_gaps']
+    skips = current.get('skips', [])
+    if skips:
+        limitations.append('skipped_questions_are_not_incorrect_answers')
+    return dict(checked_competences=[name for name in current['competences'] if name in latest],
+                confirmed_knowledge=groups['confirmed'],
+                partially_confirmed_knowledge=groups['needs_practice'],
+                identified_gaps=groups['unknown'], unverified_areas=unverified,
+                skipped_questions=deepcopy(skips), recommended_start=start,
+                limitations=limitations)
+
+
 def view(args):
     import course
     session = getattr(args, 'session', None)
@@ -153,6 +220,7 @@ def view(args):
     current = attempts[-1] if attempts else None
     return dict(valid=True, revision=journal['revision'], status=current['status'] if current else 'not_started',
                 current=current, attempts=attempts, history=journal['events'][-limit:] if limit else [],
+                summary=summary(current),
                 verification='assistant_recorded_evidence_not_automatic_grading')
 
 

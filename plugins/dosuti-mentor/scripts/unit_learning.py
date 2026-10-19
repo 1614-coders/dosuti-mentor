@@ -212,5 +212,6 @@ def learn_unit(args):
         learning['topic_summary']=topic_summary(unit,learning)
     except (ValueError,OSError) as error:
         learning=dict(valid=False,revision=None,reason=str(error),recovery='Preserve and repair unit-learning.json before writing')
+    intent=intent_view(args)
     return dict(schema=SCHEMA,unit=unit,profile=getattr(args,'profile','default'),session=session,
-                preferences=prefs,learning_intent=intent,learning=learning)
+                preferences=prefs,learning_intent=intent,learning_progress=intent['learning_progress'],learning=learning)

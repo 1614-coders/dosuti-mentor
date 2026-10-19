@@ -79,6 +79,47 @@ class DiagnosticLearning(unittest.TestCase):
         with self.assertRaises(ValueError): self.prompt(difficulty='applied')
         self.accept(); self.prompt()  # A new attempt can ask questions again.
 
+    def test_skip_records_optional_reason_without_creating_wrong_answer(self):
+        self.accept(); self.prompt()
+        skipped = self.save(dict(action='skip', prompt_revision=2,
+            next_difficulty='basic', next_competence='Explain a map',
+            selection_reason='The loop question was skipped; continue with an untested map competence',
+            skip_reason='I have not studied loops yet'))['current']
+        self.assertEqual(skipped['answers'], [])
+        self.assertEqual(skipped['skips'][0]['competence'], 'Trace a loop')
+        self.assertEqual(skipped['skips'][0]['skip_reason'], 'I have not studied loops yet')
+        self.assertEqual(skipped['next_competence'], 'Explain a map')
+        self.prompt(competence='Explain a map')
+
+    def test_skip_without_reason_leaves_competence_unverified(self):
+        self.accept(); self.prompt()
+        self.save(dict(action='skip', prompt_revision=2,
+            next_difficulty='basic', next_competence='Explain a map',
+            selection_reason='Move to the remaining untested competence'))
+        summary = self.read()['summary']
+        self.assertEqual(summary['checked_competences'], [])
+        self.assertEqual(summary['unverified_areas'], ['Trace a loop', 'Explain a map'])
+        self.assertEqual(summary['skipped_questions'][0]['skip_reason'], None)
+        self.assertIn('skipped_questions_are_not_incorrect_answers', summary['limitations'])
+
+    def test_completed_summary_survives_another_chat_and_restart(self):
+        self.accept(); self.prompt()
+        self.save(dict(action='skip', prompt_revision=2,
+            next_difficulty='basic', next_competence='Explain a map',
+            selection_reason='Check the remaining map competence'))
+        self.prompt(competence='Explain a map')
+        self.answer(evidence='needs_practice', next_competence=None)
+        self.save({'action': 'complete'})
+        expected = self.read()['summary']
+        self.assertEqual(expected['checked_competences'], ['Explain a map'])
+        self.assertEqual(expected['confirmed_knowledge'], [])
+        self.assertEqual(expected['partially_confirmed_knowledge'], ['Explain a map'])
+        self.assertEqual(expected['identified_gaps'], [])
+        self.assertEqual(expected['unverified_areas'], ['Trace a loop'])
+        self.assertEqual(expected['recommended_start'], dict(
+            competence='Explain a map', basis='partial_confirmation'))
+        self.assertEqual(self.read(session='another-chat')['summary'], expected)
+
     def test_terminal_answer_cannot_resume_questions_and_requires_completion_reason(self):
         self.accept(); self.prompt()
         answer = dict(action='answer', prompt_revision=2, answer='It prints 0 then 1',

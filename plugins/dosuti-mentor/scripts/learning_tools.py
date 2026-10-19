@@ -321,7 +321,10 @@ def resume(args):
                 if args.expected_revision!=revision(old):
                     raise ValueError('Checkpoint changed in another chat; read resume before saving')
                 atomic_json(path,dict(revision=revision(old)+1,state=value))
-    return cursor(args)
+    result=cursor(args)
+    from learning_intent import view as intent_view
+    result['learning_progress']=intent_view(args)['learning_progress']
+    return result
 
 
 def topic(args):

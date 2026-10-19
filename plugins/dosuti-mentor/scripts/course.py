@@ -629,7 +629,9 @@ def progress(args):
                                (args.lesson, args.topic, args.stage, args.details, now(), revision))
             if revision is not None and homework_integrity(homework) != 'verified':
                 raise ValueError('Homework changed during assessment; no result saved')
-    print('Saved learning event for profile', args.profile)
+    from learning_intent import view as intent_view
+    print(json.dumps(dict(saved=True,profile=args.profile,
+                          learning_progress=intent_view(args)['learning_progress']),ensure_ascii=False,indent=2))
 
 
 def diff_code(args):
@@ -701,9 +703,10 @@ def status(args):
         states = visible_progress(connection.execute('SELECT * FROM progress ORDER BY updated'),
                                   {lesson['id']: lesson for lesson in lessons})
         bindings = [dict(row) for row in connection.execute('SELECT * FROM bindings')]
+    intent=intent_view(args)
     print(json.dumps({'course': course, 'lessons': lessons, 'profile': args.profile,
                       'preferences': preferences(args), 'learning_checkpoint': cursor(args),
-                      'learning_intent': intent_view(args),
+                      'learning_intent': intent, 'learning_progress':intent['learning_progress'],
                       'progress': states, 'chat_bindings': bindings}, ensure_ascii=False, indent=2))
 
 

@@ -567,9 +567,15 @@ prompt и ключ работы; изменение файла создаёт д
 # Обучение по unit (0.4.12)
 
 `learn-unit --course COURSE --profile USER --unit-id ID --session CHAT` возвращает
-общий учебный контекст по видео/тексту. Запись попытки: --event-file JSON,
+общий учебный контекст по видео/тексту и `learning_progress`. Запись попытки: --event-file JSON,
 продолжения: --checkpoint-file JSON; нужны --expected-revision N и
 --expected-unit-sha256 SHA. Форматы/критерии: [unit-learning.md](unit-learning.md).
+
+С0.4.65 `status`, `resume`, `learn-unit` и `study-next` возвращают одинаковый
+read-only `learning_progress`: что уже изучено, какие критерии подтверждены,
+пробелы, место остановки и следующий шаг принятого маршрута. Подробнее:
+[learning-intent.md](learning-intent.md). Эта сводка не создаёт оценку и не
+принимает маршрут автоматически.
 
 
 Для явной истории проекта между занятиями (current/pinned, несколько линий,
