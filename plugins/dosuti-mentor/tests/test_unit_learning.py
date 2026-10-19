@@ -33,10 +33,38 @@ class UnitLearning(unittest.TestCase):
     def test_read_old_profile_does_not_create_learning_file(self):
         x=self.read();self.assertTrue(x['learning']['valid']);self.assertEqual(x['learning']['attempt_count'],0)
         self.assertFalse(x['learning']['all_criteria_demonstrated']);self.assertFalse(self.path.exists())
+        self.assertEqual(x['learning']['topic_summary']['outcome'],'not_assessed')
     def test_explained_is_not_independent_result(self):
         x=self.save(self.event(stage='explained',answer=None,question=None,criteria=[]))
         self.assertFalse(x['learning']['all_criteria_demonstrated']);self.assertEqual(x['learning']['criteria']['1'],'not_assessed')
         self.assertEqual(x['learning']['attempt_count'],0);self.assertEqual(x['learning']['explanation_count'],1)
+        summary=x['learning']['topic_summary']
+        self.assertEqual(summary['outcome'],'not_assessed');self.assertEqual(summary['demonstrated_criteria'],[])
+        self.assertEqual(summary['unverified_criteria'],[1]);self.assertEqual(summary['suggested_choice'],'practice')
+        self.assertEqual(summary['next_choices'],['practice','repeat_topic','choose_next_topic','pause'])
+
+    def test_topic_summary_is_read_only_and_does_not_create_completion_event(self):
+        self.save();before=self.path.read_bytes()
+        summary=self.read()['learning']['topic_summary']
+        self.assertEqual(summary['outcome'],'all_criteria_demonstrated')
+        self.assertEqual(summary['demonstrated_criteria'],[1]);self.assertEqual(summary['unverified_criteria'],[])
+        self.assertEqual(summary['suggested_choice'],'choose_next_topic')
+        self.assertEqual(self.path.read_bytes(),before)
+        explained=self.event(stage='explained',question=None,answer=None,criteria=[])
+        summary=self.save(explained)['learning']['topic_summary']
+        self.assertEqual(summary['outcome'],'all_criteria_demonstrated')
+        self.assertEqual(summary['demonstrated_criteria'],[1])
+
+    def test_topic_summary_preserves_gaps_and_flags_invalid_time(self):
+        from unittest.mock import patch
+        self.f.save(self.f.card(criteria=['Explain','Implement']))
+        summary=self.save()['learning']['topic_summary']
+        self.assertEqual(summary['outcome'],'partially_demonstrated');self.assertEqual(summary['unverified_criteria'],[2])
+        summary=self.save(self.event(stage='practice_with_help',hints=1,criteria=[2]))['learning']['topic_summary']
+        self.assertEqual(summary['outcome'],'needs_practice')
+        with patch('course.now',return_value='2000-01-01T00:00:00+00:00'):
+            summary=self.read()['learning']['topic_summary']
+        self.assertEqual(summary['outcome'],'review_evidence_time');self.assertEqual(summary['demonstrated_criteria'],[])
     def test_assisted_and_independent_answers_differ(self):
         x=self.save(self.event(stage='practice_with_help',hints=1));self.assertFalse(x['learning']['all_criteria_demonstrated'])
         x=self.save();self.assertTrue(x['learning']['all_criteria_demonstrated']);self.assertEqual(x['learning']['attempt_count'],2)
@@ -59,6 +87,8 @@ class UnitLearning(unittest.TestCase):
         self.save();source=self.read()['unit']['sources'][0];p=self.f.f.path/source['snapshot'];p.chmod(0o600);p.write_text('changed')
         x=self.read();self.assertTrue(x['unit']['stale']);self.assertEqual(x['unit']['source_contexts'],[])
         self.assertFalse(x['learning']['all_criteria_demonstrated'])
+        self.assertEqual(x['learning']['topic_summary']['outcome'],'review_sources')
+        self.assertEqual(x['learning']['topic_summary']['demonstrated_criteria'],[])
         with self.assertRaises(ValueError):self.save()
     def test_session_checkpoints_independent_assessments_shared(self):
         a=dict(recap='A',next_step='Next A',pending_question='Why A?');b=dict(recap='B',next_step='Next B',pending_question=None)

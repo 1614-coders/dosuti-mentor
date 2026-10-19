@@ -90,7 +90,7 @@ def status(args,metadata,with_progress=False):
 
 def compile_route(args,card):
     import course,study_units,career_evidence
-    fields(card,'summary sample_id learner_context steps');text(card['summary'],'route summary')
+    fields(card,'summary sample_id learner_context steps'+(' step_bases' if isinstance(card,dict) and 'step_bases' in card else ''));text(card['summary'],'route summary')
     draft=deepcopy(card);root=course.root(args)
     names=[]
     if not isinstance(draft['steps'],list):raise ValueError('Route steps require a list')
@@ -110,7 +110,11 @@ def compile_route(args,card):
     metadata=dict(sample_id=draft['sample_id'],sample_sha256=checksum,learner_context=draft['learner_context'],steps=draft['steps'])
     validate(metadata);review=status(args,metadata)
     if not review['valid']:raise ValueError('; '.join(review['reasons']))
-    return dict(summary=draft['summary'],steps=[step['title'] for step in draft['steps']],career=metadata)
+    proposal=dict(summary=draft['summary'],steps=[step['title'] for step in draft['steps']],career=metadata)
+    if 'step_bases' in draft:
+        from learning_intent import validate_bases
+        proposal['step_bases']=draft['step_bases'];validate_bases(proposal)
+    return proposal
 
 
 def route(args):
@@ -134,5 +138,5 @@ def route(args):
             output[name]=status(args,intent[name]['career'],with_progress=True)
             if intent[name]['needs_review'] and not output[name]['needs_review']:
                 output[name].update(valid=False,needs_review=True)
-                output[name]['reasons'].append('Learning goal changed; review route')
+                output[name]['reasons'].append('Learning goal or step bases need review')
     return output

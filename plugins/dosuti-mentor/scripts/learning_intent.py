@@ -7,6 +7,8 @@ from storage_lock import file_lock
 
 SCHEMA = 'learning_intent_v1'
 CAREER_SCHEMA = 'learning_intent_v2'
+CONTEXT_SCHEMA = 'learning_intent_v3'
+BASES_SCHEMA = 'learning_intent_v4'
 MAX_BYTES = 64*1024*1024
 
 
@@ -24,8 +26,15 @@ def text(value, label, limit=4000):
 
 def patch_value(value, session):
     import course
-    if not isinstance(value, dict) or not value or set(value) - {'goal','proposal','accept_proposal','session'}:
-        raise ValueError('Intent update requires goal, proposal, accept_proposal or session')
+    if not isinstance(value, dict) or not value or set(value) - {'goal','proposal','accept_proposal','session','learning_context'}:
+        raise ValueError('Intent update requires goal, proposal, accept_proposal, session or learning_context')
+    if 'learning_context' in value:
+        context=value['learning_context']
+        if (not isinstance(context,dict) or not context
+                or set(context)-{'context','constraints','self_assessment'}):
+            raise ValueError('Learning context requires context, constraints or self_assessment')
+        for name,answer in context.items():
+            if answer is not None:text(answer,'User-reported '+name)
     if 'goal' in value and value['goal'] is not None:
         goal = value['goal']
         if not isinstance(goal, dict) or 'description' not in goal or set(goal)-{'description','purpose'}:
@@ -34,12 +43,13 @@ def patch_value(value, session):
         if goal.get('purpose') is not None: text(goal['purpose'], 'Goal purpose')
     if 'proposal' in value and value['proposal'] is not None:
         plan=value['proposal']
-        if not isinstance(plan,dict) or not {'summary','steps'}<=set(plan) or set(plan)-{'summary','steps','career'}:
+        if not isinstance(plan,dict) or not {'summary','steps'}<=set(plan) or set(plan)-{'summary','steps','career','step_bases'}:
             raise ValueError('Plan proposal requires summary and steps')
         text(plan['summary'],'Plan summary')
         if not isinstance(plan['steps'],list) or not 1<=len(plan['steps'])<=50:
             raise ValueError('Plan requires 1..50 steps')
         for step in plan['steps']: text(step,'Plan step',1000)
+        if 'step_bases' in plan:validate_bases(plan)
         if 'career' in plan:
             from career_route import validate
             validate(plan['career'])
@@ -56,8 +66,56 @@ def patch_value(value, session):
     return value
 
 
+def validate_bases(plan):
+    import course
+    bases=plan['step_bases']
+    if not isinstance(bases,list) or len(bases)!=len(plan['steps']):
+        raise ValueError('Step bases must match plan steps')
+    for index,basis in enumerate(bases,1):
+        if (not isinstance(basis,dict) or not basis
+                or set(basis)-{'prerequisites','diagnostic_event_revisions','unit_ids'}):
+            raise ValueError('Step basis requires prerequisite, diagnostic answer or unit references')
+        for name,values in basis.items():
+            if not isinstance(values,list) or not 1<=len(values)<=50:
+                raise ValueError('Step basis references require 1..50 values')
+            for value in values:
+                if name=='unit_ids':course.slug(value)
+                elif type(value) is not int or value<1 or (name=='prerequisites' and value>=index):
+                    raise ValueError('Prerequisite must precede step; diagnostic revision must be positive')
+            if len(set(values))!=len(values):raise ValueError('Duplicate step basis references')
+
+
+def basis_status(args,plan):
+    """Check cited facts only; do not infer mastery or change the route."""
+    import course,study_units,diagnostic_learning
+    bases=plan['step_bases'];reasons=[];answers={}
+    names={name for basis in bases for name in basis.get('unit_ids',[])}
+    if names:
+        try:
+            root=course.root(args);registry=study_units.load(root,include_history=False)
+            for name in sorted(names-set(registry['units'])):reasons.append('Missing study unit: '+name)
+            units=study_units.checked_units(root,registry,sorted(names & set(registry['units'])),include_contexts=False)
+            for name in sorted(names & set(units)):
+                if units[name]['stale']:reasons.append('Study unit needs review: '+name)
+        except (ValueError,OSError) as error:reasons.append('Study units: '+str(error))
+    revisions={rev for basis in bases for rev in basis.get('diagnostic_event_revisions',[])}
+    if revisions:
+        try:
+            _,attempts=diagnostic_learning.load(diagnostic_learning.path_for(args))
+            answers={str(answer['revision']):answer for attempt in attempts for answer in attempt['answers']
+                     if answer['revision'] in revisions}
+            for rev in sorted(revisions):
+                if str(rev) not in answers:reasons.append('Missing diagnostic answer event: '+str(rev))
+        except (ValueError,OSError) as error:reasons.append('Diagnostic evidence: '+str(error))
+    return dict(valid=not reasons,needs_review=bool(reasons),reasons=reasons,diagnostic_evidence=answers)
+
+
 def apply(state, event):
     value=patch_value(event['changes'],event['session']); rev=event['revision']
+    if 'learning_context' in value:
+        for name,answer in value['learning_context'].items():
+            if answer is None:state['learning_context'].pop(name,None)
+            else:state['learning_context'][name]=answer
     if 'goal' in value:
         goal=value['goal']
         if goal is not None: goal=dict(description=goal['description'],purpose=goal.get('purpose'))
@@ -90,11 +148,11 @@ def load(path):
     checked(path)
     from document_store import read
     journal=read(path,dict(schema=SCHEMA,revision=0,events=[]),'learning_intent')
-    if (set(journal)!={'schema','revision','events'} or journal['schema'] not in (SCHEMA,CAREER_SCHEMA)
+    if (set(journal)!={'schema','revision','events'} or journal['schema'] not in (SCHEMA,CAREER_SCHEMA,CONTEXT_SCHEMA,BASES_SCHEMA)
             or type(journal['revision']) is not int or journal['revision']<0
             or not isinstance(journal['events'],list) or len(journal['events'])!=journal['revision']):
         raise ValueError('Invalid learning intent journal')
-    state=dict(goal=None,goal_revision=None,plan=None,proposal=None,sessions={})
+    state=dict(goal=None,goal_revision=None,plan=None,proposal=None,sessions={},learning_context={})
     for index,event in enumerate(journal['events'],1):
         if (not isinstance(event,dict) or set(event)!={'revision','at','reason','session','changes'}
                 or type(event['revision']) is not int or event['revision']!=index):
@@ -105,6 +163,10 @@ def load(path):
             course.slug(event['session'])
         if journal['schema']==SCHEMA and isinstance(event['changes'],dict) and isinstance(event['changes'].get('proposal'),dict) and 'career' in event['changes']['proposal']:
             raise ValueError('Career metadata requires learning_intent_v2')
+        if journal['schema'] not in (CONTEXT_SCHEMA,BASES_SCHEMA) and isinstance(event['changes'],dict) and 'learning_context' in event['changes']:
+            raise ValueError('Learning context requires learning_intent_v3')
+        if journal['schema']!=BASES_SCHEMA and isinstance(event['changes'],dict) and isinstance(event['changes'].get('proposal'),dict) and 'step_bases' in event['changes']['proposal']:
+            raise ValueError('Step bases require learning_intent_v4')
         apply(state,event)
     return journal,state
 
@@ -131,11 +193,15 @@ def view(args):
                     recovery='Preserve and repair or archive learning-intent.json before writing')
     def plan(value):
         if value is None:return None
-        result=dict(value,needs_review=state['goal'] is None or value['goal_revision']!=state['goal_revision'])
+        route_state='accepted' if 'accepted_revision' in value else ('proposed' if 'step_bases' in value or 'career' in value else 'preliminary')
+        result=dict(value,route_state=route_state,needs_review=state['goal'] is None or value['goal_revision']!=state['goal_revision'])
         if 'career' in value:
             from career_route import status
             result['career_status']=status(args,value['career'])
             result['needs_review']=result['needs_review'] or result['career_status']['needs_review']
+        if 'step_bases' in value:
+            result['basis_status']=basis_status(args,value)
+            result['needs_review']=result['needs_review'] or result['basis_status']['needs_review']
         return result
     plan_view=plan(state['plan']);proposal_view=plan(state['proposal'])
     task=deepcopy(state['sessions'].get(session)) if session is not None else None
@@ -143,6 +209,7 @@ def view(args):
         task['needs_review']=(task['goal_revision']!=state['goal_revision'] or
                               task['plan_revision']!=current_plan_revision(state) or bool(plan_view and task['plan_revision']==plan_view['accepted_revision'] and plan_view['needs_review']))
     return dict(valid=True,revision=journal['revision'],goal=state['goal'],goal_revision=state['goal_revision'],
+                learning_context=state['learning_context'],
                 plan=plan_view,proposal=proposal_view,session=session,session_task=task,
                 session_count=len(state['sessions']),event_count=len(journal['events']),
                 history=journal['events'][-limit:] if limit else [])
@@ -174,9 +241,14 @@ def commit(args,changes,sources_locked=False):
                 from career_route import status
                 review=status(args,proposal['career'])
                 if not review['valid']:raise ValueError('Career route needs review: '+'; '.join(review['reasons']))
+            if proposal and 'step_bases' in proposal:
+                review=basis_status(args,proposal)
+                if not review['valid']:raise ValueError('Plan step bases need review: '+'; '.join(review['reasons']))
             event=dict(revision=expected+1,at=course.now(),reason=args.reason,session=getattr(args,'session',None),changes=changes)
             apply(state,event)
             schema=CAREER_SCHEMA if journal['schema']==CAREER_SCHEMA or (proposal and 'career' in proposal) else SCHEMA
+            if journal['schema']==CONTEXT_SCHEMA or 'learning_context' in changes:schema=CONTEXT_SCHEMA
+            if journal['schema']==BASES_SCHEMA or (proposal and 'step_bases' in proposal):schema=BASES_SCHEMA
             journal=dict(schema=schema,revision=expected+1,events=journal['events']+[event])
             from document_store import write
             write(path,journal,'learning_intent',writer=atomic_json,limit=MAX_BYTES)

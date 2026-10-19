@@ -95,6 +95,27 @@ class ManagedStorage(unittest.TestCase):
         storage.maintain(self.home, True)
         self.assertFalse(stale.exists()); self.assertTrue(missing_marker.exists())
 
+    def test_dry_run_and_apply_preserve_learning_original_and_external_files(self):
+        storage.environment(self.home)
+        names=['original.mp4','run/course/learners/default/profile.json',
+               'run/course/learners/default/unit-learning.json','run/course/evidence/answer.json',
+               'run/course/study-units.json','run/course/study-sources/text.txt']
+        protected=[self.home/name for name in names]+[self.base/'external.txt']
+        for p in protected:p.parent.mkdir(parents=True,exist_ok=True);p.write_bytes(b'preserved')
+        cache=self.home/'cache/disposable';cache.write_bytes(b'cached')
+        preview=storage.maintain(self.home,max_cache_bytes=0)
+        self.assertEqual(preview['delete_cache_files'],['cache/disposable']);self.assertTrue(cache.exists())
+        storage.maintain(self.home,apply=True,max_cache_bytes=0)
+        self.assertFalse(cache.exists())
+        for p in protected:self.assertEqual(p.read_bytes(),b'preserved')
+
+    def test_cleanup_without_managed_marker_cannot_delete_cache(self):
+        storage.environment(self.home)
+        cache=self.home/'cache/disposable';cache.write_text('keep')
+        (self.home/storage.MARKER).unlink()
+        with self.assertRaises(OSError):storage.maintain(self.home,apply=True,max_cache_bytes=0)
+        self.assertEqual(cache.read_text(),'keep')
+
     def test_rejects_cache_symlink_before_deleting_any_file(self):
         storage.environment(self.home)
         outside = self.base / 'outside'; outside.write_text('user')

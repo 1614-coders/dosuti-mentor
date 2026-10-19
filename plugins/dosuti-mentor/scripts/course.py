@@ -731,12 +731,12 @@ def make_portable(args):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest='command', required=True)
-    for name in ['init', 'add-lesson', 'attach', 'prepare', 'progress', 'bind', 'status', 'context', 'frame', 'scan-screen', 'diff-code', 'history', 'make-portable', 'settings', 'resume', 'topic', 'search', 'project-map', 'resource', 'code-stage', 'term-note', 'storage-report', 'download-plan', 'doctor', 'cleanup-plan', 'cleanup-progress', 'cleanup-job', 'fragments', 'intent', 'unit', 'learn-unit', 'research', 'project-timeline', 'study-next', 'career', 'career-route', 'ocr-frame', 'compact', 'spoken-homework', 'preparation-status', 'preparation-step', 'preparation-cancel', 'preparation-summary']:
+    for name in ['init', 'add-lesson', 'attach', 'prepare', 'progress', 'bind', 'status', 'context', 'frame', 'scan-screen', 'diff-code', 'history', 'make-portable', 'settings', 'resume', 'topic', 'search', 'project-map', 'resource', 'code-stage', 'term-note', 'storage-report', 'download-plan', 'doctor', 'cleanup-plan', 'cleanup-progress', 'cleanup-job', 'fragments', 'intent', 'diagnostic', 'unit', 'learn-unit', 'research', 'project-timeline', 'study-next', 'career', 'career-route', 'ocr-frame', 'compact', 'spoken-homework', 'preparation-status', 'preparation-step', 'preparation-cancel', 'preparation-summary', 'material-status']:
         command = commands.add_parser(name)
         command.add_argument('--course', type=Path, required=True)
-        if name in ['status', 'progress', 'bind', 'context', 'history', 'settings', 'resume', 'intent', 'learn-unit', 'study-next', 'career-route', 'cleanup-progress']:
+        if name in ['status', 'progress', 'bind', 'context', 'history', 'settings', 'resume', 'intent', 'diagnostic', 'learn-unit', 'study-next', 'career-route', 'cleanup-progress']:
             command.add_argument('--profile', default='default')
-        if name in ['status','context','intent','learn-unit','study-next','career-route']:
+        if name in ['status','context','intent','diagnostic','learn-unit','study-next','career-route']:
             command.add_argument('--session',help='Stable ID for this learning session/chat task')
         if name in ['status', 'context', 'settings', 'learn-unit']:
             command.add_argument('--profiles-dir', type=Path, help='Optional shared personal preferences directory outside plugin')
@@ -785,12 +785,18 @@ def main():
             command.add_argument('--expected-revision',type=int)
             command.add_argument('--expected-unit-sha256')
             command.add_argument('--history-limit',type=int,default=0)
+        elif name == 'material-status':
+            selection = command.add_mutually_exclusive_group()
+            selection.add_argument('--unit-id')
+            selection.add_argument('--lesson')
+            command.add_argument('--time', type=float, default=0)
+            command.add_argument('--window', type=float, default=120)
         elif name == 'unit':
             group=command.add_mutually_exclusive_group()
             group.add_argument('--unit-file',type=Path)
             group.add_argument('--unit-id')
             command.add_argument('--expected-revision',type=int)
-        elif name == 'intent':
+        elif name in ('intent', 'diagnostic'):
             command.add_argument('--update-file',type=Path)
             command.add_argument('--expected-revision',type=int)
             command.add_argument('--reason')
@@ -829,7 +835,9 @@ def main():
             command.add_argument('--scope', choices=['profile','course'], default='profile')
             command.add_argument('--set', action='append', default=[])
             command.add_argument('--reset', action='store_true')
-            command.add_argument('--onboarding', choices=['complete','skipped'])
+            command.add_argument('--onboarding', choices=['in_progress','complete','skipped'])
+            command.add_argument('--onboarding-file', type=Path)
+            command.add_argument('--onboarding-skip', action='append', default=[])
         elif name == 'resume':
             command.add_argument('--state-file', type=Path)
             command.add_argument('--expected-revision', type=int)
@@ -909,13 +917,16 @@ def main():
             command.add_argument('--file')
     args = parser.parse_args()
     try:
-        if args.command in ('preparation-status', 'preparation-cancel'):
+        if args.command in ('preparation-status', 'preparation-cancel', 'material-status'):
             # Observe a live preparation operation without taking its exclusive use lock
             # or creating a managed runtime/temp session.
             from course_lifecycle import active
             directory = root(args)
             if directory.name == 'course': active(directory.parent)
-            if args.command == 'preparation-status': preparation_status(args)
+            if args.command == 'material-status':
+                from material_status import view
+                print(json.dumps(view(args), ensure_ascii=False, indent=2))
+            elif args.command == 'preparation-status': preparation_status(args)
             else:
                 from preparation_status import cancel
                 print(json.dumps(cancel(args), ensure_ascii=False, indent=2))
@@ -958,6 +969,9 @@ def main():
             elif args.command=='research':
                 from topic_research import research
                 print(json.dumps(research(args),ensure_ascii=False,indent=2))
+            elif args.command=='diagnostic':
+                from diagnostic_learning import diagnostic
+                print(json.dumps(diagnostic(args),ensure_ascii=False,indent=2))
             elif args.command=='intent':
                 from learning_intent import intent
                 print(json.dumps(intent(args),ensure_ascii=False,indent=2))

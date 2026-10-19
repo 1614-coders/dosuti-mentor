@@ -1,7 +1,7 @@
 {
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "dosuti-mentor",
-  "version": "0.4.62",
+  "version": "0.4.63",
   "description": "Personal learning goals, local lecture preparation, source-grounded teaching and practice in Codex.",
   "extensions": {
     "com.openai": {

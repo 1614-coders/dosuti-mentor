@@ -245,6 +245,41 @@ class Compact(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'additional material'): self.plan()
         self.assertTrue((self.f.pub / 'audio.wav').exists())
 
+    def test_topic_cycle_explanation_pause_independent_answer_cleanup_and_repeat(self):
+        import study_units as su
+        import unit_learning as ul
+        video=self.managed();root=self.f.f.path
+        unit_file=root.parent/'cycle-unit.json'
+        atomic_json(unit_file,dict(id='cycle',title='Cycle',summary='Temporary acceptance fixture',
+            objectives=['Explain'],criteria=['Independent explanation'],prerequisites=[],uncertainties=[],
+            sources=[dict(kind='video',role='teacher',notes='Fixture reviewed',lesson=self.f.f.args.lesson,start=0,end=60)]))
+        base=vars(self.f.f.args)|dict(unit_id='cycle',session='chat-a')
+        su.unit(NS(**(base|dict(unit_id=None,unit_file=unit_file,expected_revision=0))))
+        def read(session='chat-a'):return ul.learn_unit(NS(**(base|dict(session=session))))
+        def write(value,kind='event_file',session='chat-a'):
+            state=read(session);p=root.parent/'cycle-event.json';atomic_json(p,value)
+            return ul.learn_unit(NS(**(base|dict(session=session,expected_revision=state['learning']['revision'],
+                expected_unit_sha256=state['unit']['content_sha256'],**{kind:p}))))
+        explained=dict(stage='explained',details='Only explanation',question=None,answer=None,hints=0,criteria=[])
+        self.assertEqual(write(explained)['learning']['topic_summary']['outcome'],'not_assessed')
+        for session in ('chat-a','chat-b'):
+            checkpoint=dict(recap='Explanation only',next_step='Practice in '+session,pending_question='Explain x?')
+            write(checkpoint,'checkpoint_file',session)
+        before=write(dict(stage='solved_independently',details='Fixture answer checked',question='Explain x?',answer='Value',hints=0,criteria=[1]))
+        self.assertEqual(before['learning']['topic_summary']['outcome'],'all_criteria_demonstrated')
+        protected=[root/'study-units.json',root/'learners/default/unit-learning.json',self.f.f.video]
+        protected+=list((root/'study-sources').rglob('*')) if (root/'study-sources').exists() else []
+        protected+=list((root/'learners').rglob('*'))
+        original={p:p.read_bytes() for p in protected if p.is_file()}
+        plan=self.plan();self.assertTrue(video.exists())
+        compact.apply(self.directory,plan);self.assertFalse(video.exists())
+        with patch('course.download_video',side_effect=AssertionError('Repeat must reuse saved context')):
+            after=read();other=read('chat-b')
+        self.assertEqual(before['learning']['topic_summary'],after['learning']['topic_summary'])
+        self.assertTrue(after['unit']['source_contexts']);self.assertFalse(after['unit']['stale'])
+        self.assertEqual(other['learning']['checkpoint']['event']['value']['next_step'],'Practice in chat-b')
+        for p,raw in original.items():self.assertEqual(p.read_bytes(),raw)
+
     def test_parent_traversal_is_rejected_before_access(self):
         with self.assertRaises(ValueError):
             compact.ordinary(self.directory / 'prepared/../../outside', self.directory)

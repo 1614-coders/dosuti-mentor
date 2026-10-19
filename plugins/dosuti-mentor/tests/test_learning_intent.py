@@ -145,3 +145,69 @@ class LearningIntent(unittest.TestCase):
         with contextlib.redirect_stdout(stream):course.context(self.f.args(time=5,window=10,session='a'))
         import json
         self.assertEqual(json.loads(stream.getvalue())['learning_intent']['session_task']['task'],'Task')
+
+
+    def test_learning_context_is_optional_and_user_reported_only(self):
+        self.assertEqual(self.read()['learning_context'],{})
+        self.assertFalse(self.path.exists())
+        self.save({'learning_context':{'context':'Taking a Java course',
+                                      'self_assessment':'I think I understand loops'}})
+        self.save({'learning_context':{'constraints':'Two evenings per week'}})
+        value=self.read(history_limit=100)
+        self.assertEqual(value['learning_context'],dict(context='Taking a Java course',
+            self_assessment='I think I understand loops',constraints='Two evenings per week'))
+        self.assertEqual(course.read(self.path)['schema'],li.CONTEXT_SCHEMA)
+        self.assertIsNone(value['goal']); self.assertIsNone(value['plan'])
+        self.assertFalse((self.path.parent/'unit-learning.json').exists())
+        with course.db(self.f.a) as db:
+            self.assertEqual(db.execute('SELECT count(*) FROM progress').fetchone()[0],0)
+            self.assertEqual(db.execute('SELECT count(*) FROM events').fetchone()[0],0)
+
+    def test_context_change_preserves_goal_history_and_preferences(self):
+        self.f.prefs(values=['style=partner'])
+        self.goal(); self.propose(); self.accept()
+        self.save({'learning_context':{'self_assessment':'Beginner'}})
+        self.goal('Build a project')
+        self.propose()
+        value=self.read(history_limit=100)
+        self.assertEqual(value['learning_context'],{'self_assessment':'Beginner'})
+        self.assertTrue(value['plan']['needs_review'])
+        self.assertFalse(value['proposal']['needs_review'])
+        self.assertEqual(value['history'][0]['changes']['goal']['description'],'Learn Java')
+        self.assertEqual(self.f.prefs()['effective']['style'],'partner')
+        self.assertEqual(course.read(self.path)['schema'],li.CONTEXT_SCHEMA)
+        self.save({'learning_context':{'self_assessment':None}})
+        self.assertEqual(self.read()['learning_context'],{})
+        self.assertEqual(self.read(history_limit=100)['history'][3]['changes']
+                         ['learning_context']['self_assessment'],'Beginner')
+
+    def test_context_validation_and_conflict_preserve_journal(self):
+        self.save({'learning_context':{'context':'Existing course'}})
+        before=self.path.read_bytes()
+        invalid=[{},None,[],{'context':''},{'context':42},{'context':'x'*4001},
+                 {'verified':True},{'assessment':'confirmed'},{'style':'partner'}]
+        for value in invalid:
+            with self.subTest(value=value),self.assertRaises(ValueError):
+                self.save({'learning_context':value})
+            self.assertEqual(self.path.read_bytes(),before)
+        with self.assertRaises(ValueError):
+            self.save({'learning_context':{'self_assessment':'Expert'}},revision=0)
+        self.assertEqual(self.path.read_bytes(),before)
+
+    def test_old_intents_read_without_migration_and_upgrade_on_context_write(self):
+        self.goal()
+        original=course.read(self.path)
+        for schema in (li.SCHEMA,li.CAREER_SCHEMA):
+            journal=dict(original,schema=schema)
+            self.path.write_text(__import__('json').dumps(journal))
+            before=self.path.read_bytes()
+            self.assertTrue(self.read()['valid'])
+            self.assertEqual(self.read()['learning_context'],{})
+            self.assertEqual(self.path.read_bytes(),before)
+            self.save({'learning_context':{'self_assessment':'New to Java'}})
+            current=course.read(self.path)
+            self.assertEqual(current['schema'],li.CONTEXT_SCHEMA)
+            self.assertEqual(current['events'][:1],journal['events'])
+            current['schema']=schema
+            self.path.write_text(__import__('json').dumps(current))
+            self.assertFalse(self.read()['valid'])

@@ -117,7 +117,7 @@ def describe(directory):
         ready = result['stage'] == 'ready' and result['status'] == 'complete'
         inputs = result.get('review_inputs', {})
         if result['stage'] in ('frames_review', 'code_review', 'ready') and not inputs_match(directory, inputs):
-            result.update(stage='review', status='complete', label='Материалы изменились после сверки; требуется новая проверка')
+            result.update(review_stale=True, stage='review', status='complete', label='Материалы изменились после сверки; требуется новая проверка')
             ready = False
         if result.get('chat_reported') and result['status'] == 'reported':
             result['elapsed_seconds'] = round(max(0, time.time() - result['started_at']), 2)

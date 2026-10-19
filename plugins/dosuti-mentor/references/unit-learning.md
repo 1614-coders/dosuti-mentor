@@ -18,6 +18,15 @@ N — learning.revision, SHA — unit.content_sha256 из реально про�
 критерии, число попыток, текущих/устаревших попыток, объяснений, checkpoint и история.
 При выборе профиля другой пользователь не наследует результаты первого.
 
+`learning.topic_summary` — read-only итог для завершения диалога, не событие
+«тема освоена». Он содержит outcome, номера demonstrated/unverified criteria,
+число текущих/устаревших попыток и объяснений, checkpoint этой session и четыре
+next_choices: practice, repeat_topic, choose_next_topic, pause. suggested_choice
+не меняет маршрут или журнал. explained без ответа даёт not_assessed; все
+критерии подтверждаются только актуальными самостоятельными ответами с валидным
+временем evidence. Устаревшие материалы требуют review_sources. Итог не запускает
+очистку и не создаёт новую оценку.
+
 ## Событие
 
 Базовый JSON содержит stage, details, question, answer, hints, criteria.

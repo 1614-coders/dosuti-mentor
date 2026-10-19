@@ -27,6 +27,16 @@ class Route(unittest.TestCase):
         x=self.save();self.assertIsNone(x['intent']['plan']);self.assertTrue(x['proposal']['valid']);self.assertEqual(json.loads(self.path.read_text())['schema'],li.CAREER_SCHEMA)
         self.assertEqual(json.loads(self.path.read_text())['events'][0],before['events'][0])
         self.change(dict(accept_proposal=True));x=cr.route(self.args());self.assertTrue(x['plan']['valid']);self.assertIsNone(x['intent']['proposal'])
+    def test_route_passes_step_bases_to_ordinary_proposal(self):
+        bases=[dict(unit_ids=['maps']),dict(prerequisites=[1])]
+        result=self.save(self.card(step_bases=bases))
+        self.assertEqual(result['intent']['proposal']['step_bases'],bases)
+        self.assertTrue(result['intent']['proposal']['basis_status']['valid'])
+        self.assertEqual(result['intent']['proposal']['route_state'],'proposed')
+        self.change(dict(accept_proposal=True))
+        self.assertEqual(li.view(self.args())['plan']['step_bases'],bases)
+        self.assertEqual(json.loads(self.path.read_text())['schema'],li.BASES_SCHEMA)
+
     def test_market_zero_support_refused_foundation_without_sample_allowed(self):
         self.f.save(self.f.card(postings=[self.f.posting(status='archived')]))
         with self.assertRaises(ValueError):self.save()

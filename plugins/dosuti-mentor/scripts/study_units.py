@@ -221,6 +221,8 @@ def checked_units(root,data,names=None,include_contexts=True):
                 problems.append('Prerequisite changed or needs review: '+parent)
         row.update(stale=bool(problems),reasons=problems,source_contexts=sources,
                    verification='assistant_annotation_not_automatic_proof',mastery='not_assessed')
+        from material_status import unit_state
+        row['material_status']=unit_state(row)
         result[name]=row;return row
     for name in (units if names is None else names):check(name)
     return result

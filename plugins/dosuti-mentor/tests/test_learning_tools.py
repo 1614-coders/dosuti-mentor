@@ -4,6 +4,7 @@ import contextlib,io,json,shutil,sys
 from pathlib import Path
 from types import SimpleNamespace as NS
 import unittest
+from unittest.mock import patch
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'scripts'))
 import course,learning_tools as lt
 import test_context
@@ -37,6 +38,159 @@ class LearningTools(unittest.TestCase):
         self.assertEqual(lt.preferences(self.args(course=other,profiles_dir=shared))['effective']['format'],'file')
     def test_skipped_onboarding_persists(self):
         lt.settings(self.args(scope='profile',set=[],reset=False,onboarding='skipped'));self.assertEqual(lt.preferences(self.a)['onboarding'],'skipped')
+    def test_onboarding_pause_and_resume_in_new_chat(self):
+        lt.settings(self.args(scope='profile',set=['format=blocks'],reset=False,onboarding='in_progress'))
+        result=lt.preferences(self.args(session='another-chat'))
+        self.assertEqual(result['onboarding'],'in_progress');self.assertEqual(result['effective']['format'],'blocks')
+        self.prefs(values=['detail=concise'])
+        self.assertEqual(lt.preferences(self.a)['onboarding'],'in_progress')
+        self.onboarding(self.all_onboarding_answers())
+        self.assertEqual(lt.preferences(self.args(session='third-chat'))['onboarding'],'complete')
+        self.assertNotIn('session',lt.read_json(lt.pref_file(self.a,'profile')))
+    def test_legacy_onboarding_profiles_read_without_rewriting(self):
+        p=lt.pref_file(self.a,'profile');p.parent.mkdir(parents=True)
+        for state in (None,'not_asked','complete','skipped'):
+            with self.subTest(state=state):
+                value=dict(values=dict(style='partner'),revision=2)
+                if state is not None:value['onboarding']=state
+                p.write_text(json.dumps(value));before=p.read_bytes()
+                result=lt.preferences(self.a)
+                self.assertEqual(result['onboarding'],state or 'not_asked')
+                if state in ('complete','skipped'):
+                    self.assertEqual(result['onboarding_pending'],[])
+                    self.assertIsNone(result['onboarding_next'])
+                else:self.assertEqual(result['onboarding_next'],'outcome')
+                self.assertEqual(p.read_bytes(),before)
+    def test_direct_lecture_does_not_require_or_start_onboarding(self):
+        p=lt.pref_file(self.a,'profile')
+        for state in ('not_asked','in_progress','complete','skipped'):
+            with self.subTest(state=state):
+                if state=='complete':self.onboarding(self.all_onboarding_answers())
+                elif state!='not_asked':lt.settings(self.args(scope='profile',set=[],reset=False,onboarding=state))
+                before=p.read_bytes() if p.exists() else None
+                output=io.StringIO()
+                with contextlib.redirect_stdout(output):course.context(self.args(time=10,window=30))
+                result=json.loads(output.getvalue())
+                self.assertEqual(result['preferences']['onboarding'],state)
+                self.assertTrue(result['speech'])
+                self.assertEqual(p.read_bytes() if p.exists() else None,before)
+                self.assertFalse(list(lt.learner(self.a).glob('*intent*')))
+    def test_cli_accepts_in_progress_onboarding(self):
+        output=io.StringIO()
+        with patch.object(sys,'argv',['course.py','settings','--course',str(self.a.course),'--onboarding','in_progress']),contextlib.redirect_stdout(output):
+            course.main()
+        self.assertEqual(json.loads(output.getvalue())['onboarding'],'in_progress')
+    def test_invalid_onboarding_not_written(self):
+        self.prefs(values=['style=partner']);p=lt.pref_file(self.a,'profile');before=p.read_bytes()
+        with self.assertRaisesRegex(ValueError,'Invalid onboarding'):
+            lt.settings(self.args(scope='profile',set=[],reset=False,onboarding='paused'))
+        self.assertEqual(p.read_bytes(),before)
+    def test_onboarding_belongs_to_profile(self):
+        with self.assertRaisesRegex(ValueError,'belongs to the profile'):
+            lt.settings(self.args(scope='course',set=[],reset=False,onboarding='in_progress'))
+    def onboarding(self,answers=None,skip=(),**kw):
+        return self.settings(onboarding_file=self.write('onboarding-input.json',dict(answers=answers or {})),
+                             onboarding_skip=list(skip),**kw)
+    def all_onboarding_answers(self):
+        return dict(outcome=['topics','skill'],subject='Музыка',self_assessment='basics',
+                    learning_format='step_by_step',assistant_role='mentor',check_frequency='adaptive',
+                    explanation_detail='detailed',constraints=dict(selected=['study_time'],details='Два вечера'))
+    def test_eight_answers_complete_without_assessments_or_preference_mapping(self):
+        expected=self.all_onboarding_answers();result=self.onboarding(expected)
+        self.assertEqual(result['onboarding'],'complete');self.assertIsNone(result['onboarding_next'])
+        self.assertEqual({q:r['value'] for q,r in result['onboarding_answers'].items()},expected)
+        self.assertEqual(result['effective'],lt.DEFAULTS)
+        with course.db(self.a) as db:self.assertEqual(db.execute('SELECT count(*) FROM progress').fetchone()[0],0)
+        self.assertFalse(list(lt.learner(self.a).glob('*intent*')))
+        self.assertFalse(list(lt.learner(self.a).glob('*diagnostic*')))
+    def test_individual_skip_resume_order_and_edit_in_new_chat(self):
+        self.onboarding(dict(outcome=['course']),skip=['subject'])
+        result=lt.preferences(self.args(session='new-chat'))
+        self.assertEqual(result['onboarding_next'],'self_assessment')
+        self.assertEqual(result['onboarding_answers']['subject'],dict(status='skipped'))
+        self.assertEqual(result['onboarding'],'in_progress')
+        self.prefs(values=['style=partner'])
+        result=self.onboarding(dict(subject='История'))
+        self.assertEqual(result['onboarding_answers']['subject']['value'],'История')
+        self.assertEqual(result['onboarding_answers']['outcome']['value'],['course'])
+        self.assertEqual(result['effective']['style'],'partner')
+    def test_whole_skip_preserves_answers_and_can_change_later(self):
+        self.onboarding(dict(subject='История'))
+        result=lt.settings(self.args(scope='profile',set=[],reset=False,onboarding='skipped'))
+        self.assertEqual(result['onboarding'],'skipped');self.assertEqual(result['onboarding_pending'],[])
+        self.assertEqual(result['onboarding_answers']['subject']['value'],'История')
+        self.assertEqual(result['onboarding_answers']['outcome'],dict(status='skipped'))
+        result=self.onboarding(dict(assistant_role='partner'))
+        self.assertEqual(result['onboarding_answers']['assistant_role']['value'],'partner')
+    def test_onboarding_comment_and_profile_isolation(self):
+        path=self.write('onboarding-input.json',dict(comment='Использовать примеры из музыки'))
+        self.settings(onboarding_file=path)
+        self.assertEqual(lt.preferences(self.args(session='new-chat'))['onboarding_comment'],'Использовать примеры из музыки')
+        self.assertEqual(lt.preferences(self.args(profile='bob'))['onboarding_answers'],{})
+    def test_onboarding_invalid_updates_preserve_saved_file(self):
+        self.onboarding(dict(subject='История'));path=lt.pref_file(self.a,'profile');before=path.read_bytes()
+        invalid=[dict(outcome='topics'),dict(outcome=['topics','topics']),dict(subject=' '),
+                 dict(self_assessment=True),dict(learning_format='unknown'),dict(assistant_role='reviewer'),
+                 dict(check_frequency='sometimes'),dict(explanation_detail=[]),dict(constraints=[]),
+                 dict(constraints=dict(selected=['deadline'],details=42)),dict(progress='confirmed')]
+        for answers in invalid:
+            with self.subTest(answers=answers),self.assertRaises(ValueError):self.onboarding(answers)
+            self.assertEqual(path.read_bytes(),before)
+        for skip in (['unknown'],['subject','subject']):
+            with self.subTest(skip=skip),self.assertRaises(ValueError):self.onboarding(skip=skip)
+            self.assertEqual(path.read_bytes(),before)
+        with self.assertRaises(ValueError):self.onboarding(dict(subject='Музыка'),skip=['subject'])
+        with self.assertRaises(ValueError):lt.settings(self.args(scope='course',set=[],reset=False,onboarding=None,onboarding_skip=['subject']))
+        self.assertEqual(path.read_bytes(),before)
+    def test_corrupt_onboarding_records_are_not_overwritten(self):
+        p=lt.pref_file(self.a,'profile');p.parent.mkdir(parents=True)
+        for value in ({'unknown':dict(status='skipped')},{'subject':dict(status='answered')},
+                      {'subject':dict(status='skipped',value='invented')}):
+            p.write_text(json.dumps(dict(values={},onboarding_answers=value)));before=p.read_bytes()
+            with self.assertRaises(ValueError):self.prefs(values=['style=partner'])
+            self.assertEqual(p.read_bytes(),before)
+    def test_direct_task_preserves_partial_answer_records(self):
+        self.onboarding(dict(outcome=['course']),skip=['subject'])
+        p=lt.pref_file(self.a,'profile');before=p.read_bytes()
+        output=io.StringIO()
+        with contextlib.redirect_stdout(output):course.context(self.args(time=10,window=30))
+        result=json.loads(output.getvalue())
+        self.assertTrue(result['speech']);self.assertEqual(p.read_bytes(),before)
+        self.assertEqual(result['preferences']['onboarding_next'],'self_assessment')
+    def test_shared_onboarding_and_individual_skip_completion(self):
+        shared=self.base/'shared-onboarding'
+        self.onboarding(dict(subject='Музыка'),profiles_dir=shared)
+        result=self.settings(profiles_dir=shared,onboarding_skip=[q for q in lt.ONBOARDING_QUESTIONS if q!='subject'])
+        self.assertEqual(result['onboarding'],'complete')
+        other=self.base/'other-onboarding-course';other.mkdir();(other/'course.json').write_text('{}')
+        self.assertEqual(lt.preferences(self.args(course=other,profiles_dir=shared))['onboarding_answers'],result['onboarding_answers'])
+    def test_empty_new_onboarding_cannot_complete(self):
+        p=lt.pref_file(self.a,'profile')
+        with self.assertRaisesRegex(ValueError,'Cannot complete'):
+            lt.settings(self.args(scope='profile',set=[],reset=False,onboarding='complete'))
+        self.assertFalse(p.exists())
+        self.assertEqual(lt.preferences(self.a)['onboarding_next'],'outcome')
+    def test_legacy_complete_settings_edit_does_not_restart_onboarding(self):
+        p=lt.pref_file(self.a,'profile');p.parent.mkdir(parents=True)
+        p.write_text(json.dumps(dict(values={},onboarding='complete')))
+        result=self.prefs(values=['style=partner'])
+        self.assertEqual(result['onboarding_pending'],[]);self.assertIsNone(result['onboarding_next'])
+        self.assertEqual(result['onboarding'],'complete')
+    def test_premature_complete_and_invalid_update_metadata_rejected(self):
+        self.onboarding(dict(subject='Музыка'));p=lt.pref_file(self.a,'profile');before=p.read_bytes()
+        with self.assertRaises(ValueError):
+            lt.settings(self.args(scope='profile',set=[],reset=False,onboarding='complete'))
+        for update in (dict(comment=3),dict(answers=[]),dict(progress='confirmed'),dict(answers=dict(constraints=dict(details='')))):
+            with self.subTest(update=update),self.assertRaises(ValueError):
+                self.settings(onboarding_file=self.write('invalid-onboarding.json',update))
+            self.assertEqual(p.read_bytes(),before)
+    def test_cli_records_answer_and_individual_skip(self):
+        path=self.write('onboarding-input.json',dict(answers=dict(outcome=['skill'])))
+        output=io.StringIO()
+        with patch.object(sys,'argv',['course.py','settings','--course',str(self.a.course),
+                          '--onboarding-file',str(path),'--onboarding-skip','subject']),contextlib.redirect_stdout(output):
+            course.main()
+        self.assertEqual(json.loads(output.getvalue())['onboarding_next'],'self_assessment')
     def test_cannot_disable_evidence_checks(self):
         with self.assertRaises(ValueError):self.prefs(values=['verify_sources=false'])
         with self.assertRaises(ValueError):self.prefs(values=['style=anything'])

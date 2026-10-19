@@ -10,6 +10,52 @@ DEFAULTS = dict(style='teacher', format='steps', level='beginner', detail='balan
 CHOICES = dict(style=('teacher','partner','reviewer'), format=('steps','blocks','file'),
                level=('beginner','intermediate','advanced'), detail=('concise','balanced','detailed'),
                checks=('each_block','end','on_request'))
+ONBOARDING_STATES = ('not_asked','in_progress','complete','skipped')
+ONBOARDING_QUESTIONS = dict(
+    outcome=('topics','skill','course','profession','growth','undecided'),
+    subject=None,
+    self_assessment=('zero','basics','basic_experience','confident','significant_experience','unknown'),
+    learning_format=('theory_then_practice','brief_then_practice','example_then_explanation','tasks_projects','step_by_step','adaptive'),
+    assistant_role=('teacher','mentor','partner','examiner','flexible'),
+    check_frequency=('each_block','end','on_request','scheduled','adaptive'),
+    explanation_detail=('concise','balanced','detailed','adaptive'),
+    constraints=('deadline','study_time','existing_materials','free_pace','undecided'))
+
+
+def onboarding_answers(value):
+    if not isinstance(value,dict) or set(value)-set(ONBOARDING_QUESTIONS):
+        raise ValueError('Invalid onboarding answers')
+    for question, record in value.items():
+        if not isinstance(record,dict):raise ValueError('Invalid onboarding answer record')
+        if record == dict(status='skipped'):continue
+        if set(record)!={'status','value'} or record['status']!='answered':
+            raise ValueError('Invalid onboarding answer record')
+        answer=record['value']; choices=ONBOARDING_QUESTIONS[question]
+        if question=='subject':
+            if not isinstance(answer,str) or not answer.strip() or len(answer)>4000:
+                raise ValueError('Invalid onboarding subject')
+        elif question in ('outcome','constraints'):
+            if question=='constraints':
+                if not isinstance(answer,dict) or set(answer)-{'selected','details'}:
+                    raise ValueError('Invalid onboarding constraints')
+                details=answer.get('details','')
+                if not isinstance(details,str) or len(details)>4000:
+                    raise ValueError('Invalid onboarding constraint details')
+                answer=answer.get('selected',[])
+            else:details=''
+            if (not isinstance(answer,list) or len(answer)>len(choices)
+                    or any(not isinstance(item,str) or item not in choices for item in answer)
+                    or len(answer)!=len(set(answer)) or not (answer or details.strip())):
+                raise ValueError('Invalid onboarding selection')
+        elif not isinstance(answer,str) or answer not in choices:
+            raise ValueError('Invalid onboarding choice: '+question)
+    return value
+
+
+def onboarding_comment(value):
+    if not isinstance(value,str) or len(value)>4000:
+        raise ValueError('Invalid onboarding comment')
+    return value
 
 
 def read_json(path, default=None):
@@ -62,7 +108,7 @@ def revision(data):
 
 
 def preferences(args):
-    result = dict(DEFAULTS); layers = {}; onboarding = 'not_asked'
+    result = dict(DEFAULTS); layers = {}; onboarding = 'not_asked'; answers = {}; comment = ''
     for scope in ('profile','course'):
         path = pref_file(args,scope)
         data = read_json(path, {})
@@ -70,13 +116,20 @@ def preferences(args):
         result.update(values); layers[scope] = dict(values=values,path=str(path),revision=revision(data))
         if scope=='profile':
             onboarding = data.get('onboarding','not_asked')
-            if onboarding not in ('not_asked','complete','skipped'):
+            answers = onboarding_answers(data.get('onboarding_answers',{}))
+            comment = onboarding_comment(data.get('onboarding_comment',''))
+            if onboarding not in ONBOARDING_STATES:
                 raise ValueError('Invalid onboarding state')
-    return dict(effective=result,layers=layers,onboarding=onboarding)
+    pending = [] if onboarding in ('complete','skipped') else [question for question in ONBOARDING_QUESTIONS if question not in answers]
+    return dict(effective=result,layers=layers,onboarding=onboarding,
+                onboarding_answers=answers,onboarding_comment=comment,
+                onboarding_pending=pending,onboarding_next=pending[0] if pending else None)
 
 
 def settings(args):
-    if args.set or args.reset or args.onboarding:
+    update_file = getattr(args,'onboarding_file',None)
+    skips = getattr(args,'onboarding_skip',[]) or []
+    if args.set or args.reset or args.onboarding or update_file or skips:
         path = pref_file(args,args.scope)
         updates = {}
         for item in args.set:
@@ -84,13 +137,46 @@ def settings(args):
             if not sep:raise ValueError('Use --set key=value')
             updates[key]=val
         validate_preferences(updates)
-        if args.onboarding and args.scope!='profile':raise ValueError('Onboarding belongs to the profile')
+        if (args.onboarding or update_file or skips) and args.scope!='profile':
+            raise ValueError('Onboarding belongs to the profile')
+        update = read_json(update_file) if update_file else {}
+        if not isinstance(update,dict) or set(update)-{'answers','comment'}:
+            raise ValueError('Invalid onboarding update')
+        raw_answers=update.get('answers',{})
+        if not isinstance(raw_answers,dict):raise ValueError('Invalid onboarding answers')
+        additions={key:dict(status='answered',value=value) for key,value in raw_answers.items()}
+        if (not isinstance(skips,list) or any(not isinstance(q,str) or q not in ONBOARDING_QUESTIONS for q in skips)
+                or len(skips)!=len(set(skips)) or set(skips)&set(additions)):
+            raise ValueError('Invalid onboarding skips')
+        additions.update({question:dict(status='skipped') for question in skips})
+        onboarding_answers(additions)
+        if 'comment' in update:onboarding_comment(update['comment'])
+        if args.onboarding=='skipped' and (update_file or skips):
+            raise ValueError('Skip all onboarding separately from individual answers')
+        if args.onboarding is not None and args.onboarding not in ONBOARDING_STATES:
+            raise ValueError('Invalid onboarding state')
         with file_lock(path.with_suffix('.lock')):
             current = read_json(path,dict(values={},revision=0,onboarding='not_asked'))
             values = {} if args.reset else dict(validate_preferences(current.get('values',{})))
             values.update(updates)
-            atomic_json(path,dict(values=values,revision=revision(current)+1,
-                                  onboarding=args.onboarding or current.get('onboarding','not_asked')))
+            onboarding = args.onboarding or current.get('onboarding','not_asked')
+            if onboarding not in ONBOARDING_STATES:raise ValueError('Invalid onboarding state')
+            answers=dict(onboarding_answers(current.get('onboarding_answers',{})))
+            comment=onboarding_comment(current.get('onboarding_comment',''))
+            answers.update(additions)
+            if args.onboarding=='skipped':
+                for question in ONBOARDING_QUESTIONS:
+                    answers.setdefault(question,dict(status='skipped'))
+            elif additions:
+                onboarding='complete' if len(answers)==len(ONBOARDING_QUESTIONS) else 'in_progress'
+            if args.onboarding=='complete' and len(answers)!=len(ONBOARDING_QUESTIONS):
+                raise ValueError('Cannot complete unresolved onboarding questions')
+            if 'comment' in update:comment=update['comment']
+            saved=dict(values=values,revision=revision(current)+1,onboarding=onboarding)
+            if answers:saved['onboarding_answers']=answers
+            if comment or 'onboarding_comment' in current or 'comment' in update:
+                saved['onboarding_comment']=comment
+            atomic_json(path,saved)
     return preferences(args)
 
 

@@ -132,6 +132,26 @@ def view(args,unit,data):
                 verification='assistant_recorded_assessment_not_automatic_grading')
 
 
+def topic_summary(unit,learning):
+    """Read-only closing facts and optional choices, never a completion/mastery event."""
+    rows=learning['adaptive']['criteria']
+    demonstrated=[r['criterion'] for r in rows if r['state'] in ('solved_independently','checked_later') and r['time_valid']]
+    pending=[int(i) for i in learning['criteria'] if int(i) not in demonstrated]
+    if unit['stale']:outcome='review_sources'
+    elif not learning['evidence_time_valid']:outcome='review_evidence_time'
+    elif learning['assessment_and_time_verified']:outcome='all_criteria_demonstrated'
+    elif not learning['current_attempt_count']:outcome='not_assessed'
+    elif any(r['state'] in ('practice_with_help','needs_review') for r in rows):outcome='needs_practice'
+    else:outcome='partially_demonstrated'
+    return dict(outcome=outcome,demonstrated_criteria=demonstrated,unverified_criteria=pending,
+                current_attempt_count=learning['current_attempt_count'],outdated_attempt_count=learning['outdated_attempt_count'],
+                total_explanation_count=learning['explanation_count'],
+                next_choices=['practice','repeat_topic','choose_next_topic','pause'],
+                suggested_choice='repeat_topic' if unit['stale'] else ('choose_next_topic' if learning['assessment_and_time_verified'] else 'practice'),
+                continuation=learning['checkpoint'],
+                verification='recorded_evidence_not_mastery_or_automatic_completion')
+
+
 def learn_unit(args):
     import course
     import study_units
@@ -189,6 +209,7 @@ def learn_unit(args):
         learning['adaptive']=recommendations(unit,journal,course.now())
         learning['evidence_time_valid']=all(r['time_valid'] for r in learning['adaptive']['criteria'])
         learning['assessment_and_time_verified']=learning['all_criteria_demonstrated'] and learning['evidence_time_valid']
+        learning['topic_summary']=topic_summary(unit,learning)
     except (ValueError,OSError) as error:
         learning=dict(valid=False,revision=None,reason=str(error),recovery='Preserve and repair unit-learning.json before writing')
     return dict(schema=SCHEMA,unit=unit,profile=getattr(args,'profile','default'),session=session,
