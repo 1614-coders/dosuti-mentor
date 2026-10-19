@@ -151,11 +151,18 @@ def learning_progress(args, intent):
         result.update(lesson_history=legacy['events'],lesson_event_count=legacy['event_count'],
                       lesson_history_truncated=legacy['event_count']>len(legacy['events']))
         result['limitations'].append('legacy_lesson_checks_are_recorded_claims_without_unit_criteria')
+    except (ValueError,OSError) as error:
+        result.update(valid=False,reason='lesson learning: '+str(error))
+    # cursor.json is independent of SQLite and must survive its read failures.
+    try:
         checkpoint=cursor(args)
+        if checkpoint.get('reason')=='invalid_checkpoint':
+            raise ValueError('invalid_checkpoint; preserve and repair cursor.json')
         if checkpoint.get('state') is not None:
             result['continuations'].append(dict(kind='lesson',session=None,scope='shared_profile',**checkpoint))
     except (ValueError,OSError) as error:
-        result.update(valid=False,reason='lesson learning: '+str(error))
+        reason='legacy cursor: '+str(error)
+        result.update(valid=False,reason='; '.join(filter(None,[result.get('reason'),reason])))
     try:
         root=course.root(args);registry=study_units.load(root,include_history=False)
         units=study_units.checked_units(root,registry,include_contexts=False)
@@ -191,11 +198,12 @@ def learning_progress(args, intent):
                 revision=event['revision'],checkpoint=event['value'],valid=valid,
                 reason=None if valid else 'unit_or_sources_changed'))
     except (ValueError,OSError) as error:
-        result.update(valid=False,reason='unit learning: '+str(error))
+        reason='unit learning: '+str(error)
+        result.update(valid=False,reason='; '.join(filter(None,[result.get('reason'),reason])))
         states={}
     available=[row for row in result['continuations'] if row['valid']]
     result['continuation_choice_required']=len(available)>1
-    if len(available)==1:result['stopped_at']=available[0]
+    if result['valid'] and len(available)==1:result['stopped_at']=available[0]
     if not result['valid'] or plan is None or plan['needs_review']:return result
     answers={answer['revision']:answer for attempt in diagnostic.get('attempts',[])
              for answer in attempt['answers']}

@@ -204,5 +204,71 @@ class LearningProgress(unittest.TestCase):
         self.assertEqual(value['blocked_steps'],[2,3])
         self.assertEqual(value['next_step']['index'],1)
 
+    def test_sqlite_cursor_and_unit_continuation_matrix_is_read_only(self):
+        # A-D: real rollback/WAL databases; no SQLite reader or cursor is mocked.
+        for wal,legacy_cursor,unit_checkpoint in ((False,True,False),(True,True,False),
+                                                 (True,True,True),(True,False,True),(True,False,False)):
+            with self.subTest(wal=wal,cursor=legacy_cursor,unit=unit_checkpoint):
+                fixture=LearningProgress();fixture.setUp()
+                try:
+                    fixture.legacy()
+                    if legacy_cursor:
+                        fixture.f.f.f.add('qa',0,60,[(5,15,'Map examples')])
+                        incoming=fixture.f.f.f.directory/'cursor-input.json'
+                        incoming.write_text(json.dumps(dict(lesson='lesson-01',time=10,topic='Maps',
+                            recap='Read example',next_step='Practice',pending_question='Why?',misconceptions=[])))
+                        tools.resume(fixture.args(state_file=incoming,expected_revision=0))
+                    if unit_checkpoint:
+                        fixture.f.save(dict(recap='Unit',next_step='Practice',pending_question=None),checkpoint=True,session='a')
+                    if wal:
+                        with sqlite3.connect(fixture.f.f.f.path/'learners/default/progress.sqlite3') as connection:
+                            connection.execute('PRAGMA journal_mode=WAL')
+                    before=fixture.files()
+                    value=fixture.read(session='b')
+                    self.assertEqual(value['valid'],not wal)
+                    if wal:self.assertIn('WAL',value['reason'])
+                    self.assertEqual(len(value['continuations']),int(legacy_cursor)+int(unit_checkpoint))
+                    self.assertTrue(all(c['valid'] for c in value['continuations']))
+                    self.assertEqual(value['continuation_choice_required'],legacy_cursor and unit_checkpoint)
+                    if wal or (legacy_cursor and unit_checkpoint):self.assertIsNone(value['stopped_at'])
+                    else:self.assertEqual(value['stopped_at']['kind'],'lesson')
+                    self.assertEqual(fixture.files(),before)
+                finally:fixture.doCleanups()
+
+    def test_corrupt_cursor_keeps_other_data_and_prevents_automatic_selection(self):
+        # E: a broken independent cursor cannot erase SQLite/unit evidence.
+        self.legacy('practice_checked');self.f.save()
+        self.f.save(dict(recap='Unit',next_step='Practice',pending_question=None),checkpoint=True,session='a')
+        (self.f.path.parent/'cursor.json').write_text('{')
+        before=self.files();value=self.read(session='b')
+        self.assertFalse(value['valid'])
+        self.assertIn('cursor',value['reason'])
+        self.assertEqual(value['demonstrated_units'],['maps'])
+        self.assertEqual(len(value['completed_lesson_tasks']),1)
+        self.assertEqual(len(value['continuations']),1)
+        self.assertIsNone(value['stopped_at'])
+        self.assertEqual(self.files(),before)
+
+        with sqlite3.connect(self.f.path.parent/'progress.sqlite3') as connection:
+            connection.execute('PRAGMA journal_mode=WAL')
+        before=self.files();value=self.read(session='b')
+        self.assertFalse(value['valid'])
+        self.assertIn('WAL',value['reason'])
+        self.assertIn('cursor',value['reason'])
+        self.assertEqual(value['demonstrated_units'],['maps'])
+        self.assertIsNone(value['stopped_at'])
+        self.assertEqual(self.files(),before)
+
+    def test_multiple_unit_chats_still_require_choice_without_legacy_cursor(self):
+        # F-H: existing unit-only courses and per-chat checkpoints stay compatible.
+        for session in ('a','b'):
+            self.f.save(dict(recap=session,next_step='Practice',pending_question=None),checkpoint=True,session=session)
+        before=self.files();value=self.read(session='c')
+        self.assertTrue(value['valid'])
+        self.assertEqual({c['session'] for c in value['continuations']},{'a','b'})
+        self.assertTrue(value['continuation_choice_required'])
+        self.assertIsNone(value['stopped_at'])
+        self.assertEqual(self.files(),before)
+
 
 if __name__ == '__main__': unittest.main()
