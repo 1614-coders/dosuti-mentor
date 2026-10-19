@@ -171,6 +171,37 @@ def visible_progress(rows, lessons):
     return result
 
 
+def read_progress(args):
+    """Read legacy SQLite without creating a profile, migrating tables or writing."""
+    from profile_storage import profile_path, checked
+    path=profile_path(root(args),getattr(args,'profile','default'))/'progress.sqlite3'
+    result=dict(progress=[],events=[],event_count=0,chat_bindings=[])
+    if checked(path) is None:return result
+    for suffix in ('-journal','-wal','-shm'):checked(Path(str(path)+suffix))
+    # SQLite readers can write WAL shared-memory bookkeeping even with mode=ro.
+    # Preserve such databases and report the limitation instead of touching them.
+    with path.open('rb') as stream:header=stream.read(20)
+    if header[:16]==b'SQLite format 3\x00' and header[18:20]!=b'\x01\x01':
+        raise ValueError('WAL lesson progress requires an external checkpoint before read-only reporting')
+    try:connection=sqlite3.connect(path.as_uri()+'?mode=ro',uri=True)
+    except sqlite3.Error as error:raise ValueError('Cannot read lesson progress: '+str(error)) from error
+    connection.row_factory=sqlite3.Row
+    try:
+        tables={row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        if 'progress' in tables:
+            result['progress']=[dict(homework_revision=None,**dict(row)) if 'homework_revision' not in row.keys() else dict(row)
+                                for row in connection.execute('SELECT * FROM progress ORDER BY updated,lesson,topic')]
+        if 'events' in tables:
+            result['event_count']=connection.execute('SELECT count(*) FROM events').fetchone()[0]
+            result['events']=[dict(row) for row in connection.execute('SELECT * FROM events ORDER BY id DESC LIMIT 100')][::-1]
+        if 'bindings' in tables:
+            result['chat_bindings']=[dict(row) for row in connection.execute('SELECT * FROM bindings ORDER BY chat')]
+    except sqlite3.Error as error:
+        raise ValueError('Cannot read lesson progress: '+str(error)) from error
+    finally:connection.close()
+    return result
+
+
 def bind(args):
     lesson_path(args)
     with db(args) as connection:
@@ -197,10 +228,8 @@ def context(args):
     selected['learning_checkpoint'] = cursor(args)
     selected['learning_checkpoint']['applies_to_lesson'] = (
         (selected['learning_checkpoint'].get('state') or {}).get('lesson') == args.lesson)
-    with db(args) as connection:
-        selected['learner_progress'] = visible_progress(connection.execute(
-            'SELECT * FROM progress WHERE lesson=? ORDER BY updated', (args.lesson,)),
-            {args.lesson: data})
+    selected['learner_progress'] = visible_progress(
+        [row for row in read_progress(args)['progress'] if row['lesson']==args.lesson],{args.lesson:data})
     print(json.dumps(selected, ensure_ascii=False, indent=2))
 
 
@@ -699,10 +728,9 @@ def status(args):
             working = directory / '.jobs' / slug(job['job_key'])
             job['processing_status'] = (processing_status(working)
                 if working.resolve().is_relative_to(directory.resolve()) else {'status': 'unavailable'})
-    with db(args) as connection:
-        states = visible_progress(connection.execute('SELECT * FROM progress ORDER BY updated'),
-                                  {lesson['id']: lesson for lesson in lessons})
-        bindings = [dict(row) for row in connection.execute('SELECT * FROM bindings')]
+    legacy=read_progress(args)
+    states=visible_progress(legacy['progress'],{lesson['id']: lesson for lesson in lessons})
+    bindings=legacy['chat_bindings']
     intent=intent_view(args)
     print(json.dumps({'course': course, 'lessons': lessons, 'profile': args.profile,
                       'preferences': preferences(args), 'learning_checkpoint': cursor(args),
@@ -739,7 +767,7 @@ def main():
         command.add_argument('--course', type=Path, required=True)
         if name in ['status', 'progress', 'bind', 'context', 'history', 'settings', 'resume', 'intent', 'diagnostic', 'learn-unit', 'study-next', 'career-route', 'cleanup-progress']:
             command.add_argument('--profile', default='default')
-        if name in ['status','context','intent','diagnostic','learn-unit','study-next','career-route']:
+        if name in ['status','context','resume','intent','diagnostic','learn-unit','study-next','career-route']:
             command.add_argument('--session',help='Stable ID for this learning session/chat task')
         if name in ['status', 'context', 'settings', 'learn-unit']:
             command.add_argument('--profiles-dir', type=Path, help='Optional shared personal preferences directory outside plugin')

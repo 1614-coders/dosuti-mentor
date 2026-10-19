@@ -71,6 +71,7 @@ def load(path,unit_id=None,compact=False,history_limit=0):
     from collections import deque
     if type(history_limit) is not int or not 0<=history_limit<=100:raise ValueError('history-limit must be 0..100')
     retained=[];latest={};baselines={};count=0;counts={};history=deque(maxlen=history_limit)
+    successful=deque(maxlen=history_limit);successful_count=0
     for i,event in enumerate(events,1):
         if (not isinstance(event,dict) or set(event)!={'revision','at','unit','unit_sha256','session','type','value'}
                 or type(event['revision']) is not int or event['revision']!=i):raise ValueError('Invalid unit learning history')
@@ -88,8 +89,10 @@ def load(path,unit_id=None,compact=False,history_limit=0):
         if event['type']=='assessment':
             for criterion in event['value']['criteria']:baselines[(event['unit'],event['unit_sha256'],criterion)]=event
         if unit_id is not None and event['unit']!=unit_id:continue
+        if compact:history.append(event)
+        if compact and unit_id is None and event['type']=='assessment' and event['value']['stage'] in ('solved_independently','checked_later'):
+            successful.append(event);successful_count+=1
         if unit_id is not None and compact:
-            history.append(event)
             if event['type']=='assessment':
                 key=event['unit_sha256'];entry=counts.setdefault(key,dict(attempts=0,explanations=0))
                 entry['explanations' if event['value']['stage']=='explained' else 'attempts']+=1
@@ -102,6 +105,8 @@ def load(path,unit_id=None,compact=False,history_limit=0):
     if compact:retained=sorted({e['revision']:e for e in latest.values()}.values(),key=lambda e:e['revision'])
     result=dict(schema=schema,revision=revision,events=retained)
     if compact and unit_id is not None:result.update(_counts=counts,_history=list(history))
+    elif compact and history_limit:
+        result.update(_history=list(history),_completed_tasks=list(successful),_completed_task_count=successful_count)
     return result
 
 
@@ -167,7 +172,7 @@ def learn_unit(args):
     assessment=getattr(args,'event_file',None);checkpoint=getattr(args,'checkpoint_file',None);decision=getattr(args,'review_file',None)
     if sum(bool(v) for v in (assessment,checkpoint,decision))>1:raise ValueError('Choose assessment, checkpoint or review decision')
     path=folder/'unit-learning.json'
-    prefs=preferences(args);intent=intent_view(args)
+    prefs=preferences(args)
     def selected():
         data=study_units.load(root,include_history=False)
         if args.unit_id not in data['units']:raise ValueError('Unknown study unit')

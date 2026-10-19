@@ -123,18 +123,45 @@ def learning_progress(args, intent):
                                 unverified_areas=(summary or {}).get('unverified_areas',[]),
                                 recommended_start=(summary or {}).get('recommended_start')),
                 studied_units=[], demonstrated_units=[], unit_gaps=[],
-                completed_steps=[], current_step=None, next_step=None, stopped_at=None,
+                studied_lessons=[],confirmed_lesson_knowledge=[],completed_lesson_tasks=[],
+                completed_unit_tasks=[],lesson_history=[],unit_history=[],
+                continuations=[],continuation_choice_required=False,
+                completed_steps=[],blocked_steps=[],current_step=None,next_step=None,stopped_at=None,
                 limitations=['recorded_evidence_not_automatic_grading'])
     if not diagnostic.get('valid'):
-        result.update(valid=False, reason='diagnostic: '+diagnostic['reason']);return result
+        result.update(valid=False, reason='diagnostic: '+diagnostic['reason'])
     plan=intent['plan']
-    if plan is None or plan['needs_review']:
-        return result
+    from learning_tools import learner,cursor
+    try:
+        legacy=course.read_progress(args)
+        lessons={}
+        from spoken_homework import resolve
+        for row in legacy['progress']:
+            directory=course.root(args)/'lessons'/course.slug(row['lesson'])
+            if (directory/'lesson.json').exists():
+                data=course.read(directory/'lesson.json')
+                lessons[row['lesson']]=dict(data,homework=resolve(directory,data))
+        rows=course.visible_progress(legacy['progress'],lessons)
+        result['studied_lessons']=rows
+        # Old lesson records do not contain criterion-bound independent answers.
+        result['confirmed_lesson_knowledge']=[dict(row,verification='legacy_recorded_claim') for row in rows if row['stage'] in
+            ('understood','theory_checked','practice_checked','homework_passed') and not row['invalidated']]
+        result['completed_lesson_tasks']=[dict(row,verification='legacy_recorded_claim') for row in rows if row['stage'] in
+            ('practice_checked','homework_passed') and not row['invalidated']]
+        result.update(lesson_history=legacy['events'],lesson_event_count=legacy['event_count'],
+                      lesson_history_truncated=legacy['event_count']>len(legacy['events']))
+        result['limitations'].append('legacy_lesson_checks_are_recorded_claims_without_unit_criteria')
+        checkpoint=cursor(args)
+        if checkpoint.get('state') is not None:
+            result['continuations'].append(dict(kind='lesson',session=None,scope='shared_profile',**checkpoint))
+    except (ValueError,OSError) as error:
+        result.update(valid=False,reason='lesson learning: '+str(error))
     try:
         root=course.root(args);registry=study_units.load(root,include_history=False)
         units=study_units.checked_units(root,registry,include_contexts=False)
-        from learning_tools import learner
-        journal=unit_learning.load(learner(args)/'unit-learning.json',compact=True)
+        journal=unit_learning.load(learner(args)/'unit-learning.json',compact=True,history_limit=100)
+        result.update(unit_history=journal['_history'],unit_event_count=journal['revision'],
+                      unit_history_truncated=journal['revision']>100)
         states={}
         for name,unit in units.items():
             view=unit_learning.view(args,unit,journal)
@@ -148,17 +175,39 @@ def learning_progress(args, intent):
             for criterion,state in view['criteria'].items():
                 if state in ('needs_review','practice_with_help'):
                     result['unit_gaps'].append(dict(unit=name,criterion=int(criterion),state=state))
-            checkpoint=view['checkpoint'].get('event')
-            if view['checkpoint']['valid'] and (result['stopped_at'] is None or checkpoint['revision'] > result['stopped_at']['revision']):
-                result['stopped_at']=dict(unit=name,revision=checkpoint['revision'],checkpoint=checkpoint['value'])
+        for event in journal['_completed_tasks']:
+            unit=units.get(event['unit'])
+            result['completed_unit_tasks'].append(dict(unit=event['unit'],revision=event['revision'],
+                criteria=event['value']['criteria'],stage=event['value']['stage'],
+                current=bool(unit and not unit['stale'] and unit['content_sha256']==event['unit_sha256'])))
+        result['completed_unit_task_count']=journal['_completed_task_count']
+        latest={}
+        for event in journal['events']:
+            if event['type']=='checkpoint':latest[(event['unit'],event['session'])]=event
+        for (name,session),event in latest.items():
+            unit=units.get(name)
+            valid=bool(unit and not unit['stale'] and unit['content_sha256']==event['unit_sha256'])
+            result['continuations'].append(dict(kind='unit',unit=name,session=session,
+                revision=event['revision'],checkpoint=event['value'],valid=valid,
+                reason=None if valid else 'unit_or_sources_changed'))
     except (ValueError,OSError) as error:
-        result.update(valid=False,reason='unit learning: '+str(error));return result
+        result.update(valid=False,reason='unit learning: '+str(error))
+        states={}
+    available=[row for row in result['continuations'] if row['valid']]
+    result['continuation_choice_required']=len(available)>1
+    if len(available)==1:result['stopped_at']=available[0]
+    if not result['valid'] or plan is None or plan['needs_review']:return result
     answers={answer['revision']:answer for attempt in diagnostic.get('attempts',[])
              for answer in attempt['answers']}
     steps=[]
     for index,title in enumerate(plan['steps'],1):
         basis=(plan.get('step_bases') or [{} for _ in plan['steps']])[index-1]
         prerequisites=basis.get('prerequisites',[]);unit_ids=basis.get('unit_ids',[])
+        if 'career' in plan:
+            career=plan['career']['steps'][index-1]
+            unit_ids=list(dict.fromkeys(unit_ids+[unit['id'] for unit in career['units']]))
+            prerequisites=list(dict.fromkeys(prerequisites+[
+                i for i,step in enumerate(plan['career']['steps'],1) if step['id'] in career['prerequisites']]))
         findings=[answers[revision]['evidence'] for revision in basis.get('diagnostic_event_revisions',[]) if revision in answers]
         guidance=('address_identified_gap' if 'unknown' in findings else
                   'practice_partially_confirmed' if 'needs_practice' in findings else
@@ -166,11 +215,12 @@ def learning_progress(args, intent):
         completed=bool(unit_ids) and all(states.get(name,{}).get('demonstrated') for name in unit_ids)
         steps.append(dict(index=index,title=title,unit_ids=unit_ids,prerequisites=prerequisites,
                           diagnostic_guidance=guidance,completed=completed))
+    result['completed_steps']=[step['index'] for step in steps if step['completed']]
     for step in steps:
-        if step['completed']:
-            result['completed_steps'].append(step['index']);continue
-        if any(not steps[number-1]['completed'] for number in step['prerequisites']):
-            continue
+        if any(not steps[number-1]['completed'] or number in result['blocked_steps'] for number in step['prerequisites']):
+            result['blocked_steps'].append(step['index'])
+    for step in steps:
+        if step['completed'] or step['index'] in result['blocked_steps']:continue
         result['current_step']=step
         result['next_step']=step
         break

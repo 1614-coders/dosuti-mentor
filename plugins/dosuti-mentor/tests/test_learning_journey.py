@@ -221,7 +221,11 @@ class LearningJourney(unittest.TestCase):
             lesson='lesson-01', topic='Legacy lesson note', stage='explained', details='Explained source')))
         with __import__('contextlib').redirect_stdout(stream):
             course.progress(legacy_args)
-        self.assertEqual(json.loads(stream.getvalue())['learning_progress'], after)
+        saved=json.loads(stream.getvalue())['learning_progress']
+        self.assertEqual(saved['demonstrated_units'],after['demonstrated_units'])
+        self.assertEqual(saved['completed_steps'],after['completed_steps'])
+        self.assertEqual(saved['studied_lessons'][0]['topic'],'Legacy lesson note')
+        self.assertEqual(saved['confirmed_lesson_knowledge'],[])
 
     def test_acceptance_cycle_ten_questions_route_handoff_and_safe_cleanup(self):
         answers = dict(outcome=['profession'], subject='Java backend', self_assessment='basics',
