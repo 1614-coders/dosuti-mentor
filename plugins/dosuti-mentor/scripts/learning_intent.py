@@ -9,6 +9,7 @@ SCHEMA = 'learning_intent_v1'
 CAREER_SCHEMA = 'learning_intent_v2'
 CONTEXT_SCHEMA = 'learning_intent_v3'
 BASES_SCHEMA = 'learning_intent_v4'
+TARGETS_SCHEMA = 'learning_intent_v5'
 MAX_BYTES = 64*1024*1024
 
 
@@ -43,13 +44,21 @@ def patch_value(value, session):
         if goal.get('purpose') is not None: text(goal['purpose'], 'Goal purpose')
     if 'proposal' in value and value['proposal'] is not None:
         plan=value['proposal']
-        if not isinstance(plan,dict) or not {'summary','steps'}<=set(plan) or set(plan)-{'summary','steps','career','step_bases'}:
+        if not isinstance(plan,dict) or not {'summary','steps'}<=set(plan) or set(plan)-{'summary','steps','career','step_bases','adaptation_basis'}:
             raise ValueError('Plan proposal requires summary and steps')
         text(plan['summary'],'Plan summary')
         if not isinstance(plan['steps'],list) or not 1<=len(plan['steps'])<=50:
             raise ValueError('Plan requires 1..50 steps')
         for step in plan['steps']: text(step,'Plan step',1000)
         if 'step_bases' in plan:validate_bases(plan)
+        if 'adaptation_basis' in plan:
+            basis=plan['adaptation_basis']
+            if not isinstance(basis,dict) or set(basis)!={'base_plan_revision','diagnostic_revision','unit_learning_revision'}:
+                raise ValueError('Invalid adaptation basis')
+            for key,revision in basis.items():
+                if key=='base_plan_revision' and revision is None:continue
+                if type(revision) is not int or revision<(1 if key=='base_plan_revision' else 0):
+                    raise ValueError('Invalid adaptation revision')
         if 'career' in plan:
             from career_route import validate
             validate(plan['career'])
@@ -73,9 +82,10 @@ def validate_bases(plan):
         raise ValueError('Step bases must match plan steps')
     for index,basis in enumerate(bases,1):
         if (not isinstance(basis,dict) or not basis
-                or set(basis)-{'prerequisites','diagnostic_event_revisions','unit_ids'}):
+                or set(basis)-{'prerequisites','diagnostic_event_revisions','unit_ids','targets'}):
             raise ValueError('Step basis requires prerequisite, diagnostic answer or unit references')
         for name,values in basis.items():
+            if name=='targets':continue
             if not isinstance(values,list) or not 1<=len(values)<=50:
                 raise ValueError('Step basis references require 1..50 values')
             for value in values:
@@ -83,12 +93,36 @@ def validate_bases(plan):
                 elif type(value) is not int or value<1 or (name=='prerequisites' and value>=index):
                     raise ValueError('Prerequisite must precede step; diagnostic revision must be positive')
             if len(set(values))!=len(values):raise ValueError('Duplicate step basis references')
+        if 'targets' in basis:validate_targets(basis['targets'],basis)
+
+
+def has_targets(plan):
+    return (isinstance(plan,dict) and isinstance(plan.get('step_bases',[]),list)
+            and any(isinstance(basis,dict) and 'targets' in basis for basis in plan.get('step_bases',[])))
+
+
+def validate_targets(targets,basis):
+    from source_integrity import digest
+    if not isinstance(targets,list) or not 1<=len(targets)<=50:raise ValueError('Step requires 1..50 targets')
+    for target in targets:
+        if not isinstance(target,dict) or set(target)!={'competence','rationale','unit_id','unit_sha256','criteria','diagnostic_event_revisions'}:
+            raise ValueError('Target requires competence/rationale/unit/version/criteria/diagnostic references')
+        text(target['competence'],'Target competence',1000);text(target['rationale'],'Target rationale')
+        if target['unit_id'] not in basis.get('unit_ids',[]):raise ValueError('Target unit must belong to step units')
+        digest(target['unit_sha256'])
+        for name in ('criteria','diagnostic_event_revisions'):
+            values=target[name]
+            if (not isinstance(values,list) or len(values)>50 or (name=='criteria' and not values)
+                    or any(type(value) is not int or value<1 for value in values) or len(set(values))!=len(values)):
+                raise ValueError('Invalid target '+name)
+        if any(rev not in basis.get('diagnostic_event_revisions',[]) for rev in target['diagnostic_event_revisions']):
+            raise ValueError('Target diagnostic references must belong to step evidence')
 
 
 def basis_status(args,plan):
     """Check cited facts only; do not infer mastery or change the route."""
     import course,study_units,diagnostic_learning
-    bases=plan['step_bases'];reasons=[];answers={}
+    bases=plan['step_bases'];reasons=[];answers={};units={}
     names={name for basis in bases for name in basis.get('unit_ids',[])}
     if names:
         try:
@@ -107,7 +141,35 @@ def basis_status(args,plan):
             for rev in sorted(revisions):
                 if str(rev) not in answers:reasons.append('Missing diagnostic answer event: '+str(rev))
         except (ValueError,OSError) as error:reasons.append('Diagnostic evidence: '+str(error))
+    for basis in bases:
+        for target in basis.get('targets',[]):
+            unit=units.get(target['unit_id'])
+            if unit and (target['unit_sha256']!=unit['content_sha256'] or any(i>len(unit['criteria']) for i in target['criteria'])):
+                reasons.append('Target unit version or criteria changed: '+target['unit_id'])
+            for revision in target['diagnostic_event_revisions']:
+                answer=answers.get(str(revision))
+                if answer and answer['competence']!=target['competence']:
+                    reasons.append('Diagnostic competence differs from learning target: '+target['competence'])
     return dict(valid=not reasons,needs_review=bool(reasons),reasons=reasons,diagnostic_evidence=answers)
+
+
+def adaptation_snapshot(args,state):
+    import diagnostic_learning,unit_learning
+    from learning_tools import learner
+    journal,_=diagnostic_learning.load(diagnostic_learning.path_for(args))
+    learning=unit_learning.load(learner(args)/'unit-learning.json',compact=True)
+    return dict(base_plan_revision=state['plan']['accepted_revision'] if state['plan'] else None,
+                diagnostic_revision=journal['revision'],unit_learning_revision=learning['revision'])
+
+
+def adaptation_status(args,proposal,state):
+    """Recheck proposal evidence, never invalidate an accepted plan after learning."""
+    expected=proposal['adaptation_basis'];reasons=[]
+    try:
+        actual=adaptation_snapshot(args,state)
+        if expected!=actual:reasons.append('Plan or learning evidence changed; reassess adaptation proposal')
+    except (ValueError,OSError) as error:reasons.append(str(error))
+    return dict(valid=not reasons,needs_review=bool(reasons),reasons=reasons)
 
 
 def learning_progress(args, intent):
@@ -116,7 +178,7 @@ def learning_progress(args, intent):
     diagnostic=diagnostic_learning.view(args)
     summary=diagnostic.get('summary') if diagnostic.get('valid') else None
     result=dict(valid=True, route_state=(intent['plan'] or {}).get('route_state','none'),
-                diagnostic=dict(status=diagnostic.get('status'),
+                diagnostic=dict(status=diagnostic.get('status'),revision=diagnostic.get('revision'),
                                 confirmed_knowledge=(summary or {}).get('confirmed_knowledge',[]),
                                 partially_confirmed_knowledge=(summary or {}).get('partially_confirmed_knowledge',[]),
                                 identified_gaps=(summary or {}).get('identified_gaps',[]),
@@ -176,7 +238,7 @@ def learning_progress(args, intent):
             adaptive=recommendations(unit,journal,course.now())
             current=not unit['stale'] and view['all_criteria_demonstrated'] and all(row['time_valid'] for row in adaptive['criteria'])
             states[name]=dict(studied=bool(view['attempt_count'] or view['explanation_count']),demonstrated=current,
-                              criteria=view['criteria'],checkpoint=view['checkpoint'])
+                              criteria=view['criteria'],checkpoint=view['checkpoint'],adaptive=adaptive['criteria'])
             if states[name]['studied']:result['studied_units'].append(name)
             if current:result['demonstrated_units'].append(name)
             for criterion,state in view['criteria'].items():
@@ -221,6 +283,11 @@ def learning_progress(args, intent):
                   'practice_partially_confirmed' if 'needs_practice' in findings else
                   'confirm_transfer' if 'confirmed' in findings else 'no_diagnostic_evidence')
         completed=bool(unit_ids) and all(states.get(name,{}).get('demonstrated') for name in unit_ids)
+        targets=basis.get('targets',[])
+        if targets:
+            completed=all(all(any(row['criterion']==index and row['state'] in ('solved_independently','checked_later')
+                and row['time_valid'] for row in states.get(target['unit_id'],{}).get('adaptive',[]))
+                for index in target['criteria']) for target in targets)
         steps.append(dict(index=index,title=title,unit_ids=unit_ids,prerequisites=prerequisites,
                           diagnostic_guidance=guidance,completed=completed))
     result['completed_steps']=[step['index'] for step in steps if step['completed']]
@@ -273,7 +340,7 @@ def load(path):
     checked(path)
     from document_store import read
     journal=read(path,dict(schema=SCHEMA,revision=0,events=[]),'learning_intent')
-    if (set(journal)!={'schema','revision','events'} or journal['schema'] not in (SCHEMA,CAREER_SCHEMA,CONTEXT_SCHEMA,BASES_SCHEMA)
+    if (set(journal)!={'schema','revision','events'} or journal['schema'] not in (SCHEMA,CAREER_SCHEMA,CONTEXT_SCHEMA,BASES_SCHEMA,TARGETS_SCHEMA)
             or type(journal['revision']) is not int or journal['revision']<0
             or not isinstance(journal['events'],list) or len(journal['events'])!=journal['revision']):
         raise ValueError('Invalid learning intent journal')
@@ -288,10 +355,13 @@ def load(path):
             course.slug(event['session'])
         if journal['schema']==SCHEMA and isinstance(event['changes'],dict) and isinstance(event['changes'].get('proposal'),dict) and 'career' in event['changes']['proposal']:
             raise ValueError('Career metadata requires learning_intent_v2')
-        if journal['schema'] not in (CONTEXT_SCHEMA,BASES_SCHEMA) and isinstance(event['changes'],dict) and 'learning_context' in event['changes']:
+        if journal['schema'] not in (CONTEXT_SCHEMA,BASES_SCHEMA,TARGETS_SCHEMA) and isinstance(event['changes'],dict) and 'learning_context' in event['changes']:
             raise ValueError('Learning context requires learning_intent_v3')
-        if journal['schema']!=BASES_SCHEMA and isinstance(event['changes'],dict) and isinstance(event['changes'].get('proposal'),dict) and 'step_bases' in event['changes']['proposal']:
+        proposal=event['changes'].get('proposal') if isinstance(event['changes'],dict) else None
+        if journal['schema'] not in (BASES_SCHEMA,TARGETS_SCHEMA) and isinstance(proposal,dict) and 'step_bases' in proposal:
             raise ValueError('Step bases require learning_intent_v4')
+        if journal['schema']!=TARGETS_SCHEMA and isinstance(proposal,dict) and (has_targets(proposal) or 'adaptation_basis' in proposal):
+            raise ValueError('Learning targets and adaptation require learning_intent_v5')
         apply(state,event)
     return journal,state
 
@@ -327,6 +397,9 @@ def view(args):
         if 'step_bases' in value:
             result['basis_status']=basis_status(args,value)
             result['needs_review']=result['needs_review'] or result['basis_status']['needs_review']
+        if 'accepted_revision' not in value and 'adaptation_basis' in value:
+            result['adaptation_status']=adaptation_status(args,value,state)
+            result['needs_review']=result['needs_review'] or result['adaptation_status']['needs_review']
         return result
     plan_view=plan(state['plan']);proposal_view=plan(state['proposal'])
     task=deepcopy(state['sessions'].get(session)) if session is not None else None
@@ -347,7 +420,7 @@ def commit(args,changes,sources_locked=False):
     import course
     from profile_storage import checked
     from contextlib import ExitStack
-    changes=patch_value(changes,getattr(args,'session',None))
+    changes=deepcopy(patch_value(changes,getattr(args,'session',None)))
     text(getattr(args,'reason',None),'Reason')
     expected=getattr(args,'expected_revision',None)
     if type(expected) is not int or expected<0:raise ValueError('Intent update requires --expected-revision')
@@ -364,6 +437,17 @@ def commit(args,changes,sources_locked=False):
             if journal['revision']!=expected:raise ValueError('Learning intent changed in another chat; read intent again')
             proposal=changes.get('proposal')
             if changes.get('accept_proposal'):proposal=state['proposal']
+            if proposal and has_targets(proposal) and state['plan'] and 'adaptation_basis' not in proposal:
+                raise ValueError('Targeted route replacement requires adaptation_basis')
+            if proposal and (has_targets(proposal) or 'adaptation_basis' in proposal):
+                from learning_tools import learner
+                for name in ('diagnostic-learning.lock','unit-learning.lock'):
+                    evidence_lock=learner(args)/name;checked(evidence_lock)
+                    stack.enter_context(file_lock(evidence_lock));checked(evidence_lock)
+                if 'adaptation_basis' not in proposal:
+                    proposal['adaptation_basis']=adaptation_snapshot(args,state)
+                review=adaptation_status(args,proposal,state)
+                if not review['valid']:raise ValueError('Route adaptation needs review: '+'; '.join(review['reasons']))
             if proposal and 'career' in proposal:
                 from career_route import status
                 review=status(args,proposal['career'])
@@ -376,6 +460,7 @@ def commit(args,changes,sources_locked=False):
             schema=CAREER_SCHEMA if journal['schema']==CAREER_SCHEMA or (proposal and 'career' in proposal) else SCHEMA
             if journal['schema']==CONTEXT_SCHEMA or 'learning_context' in changes:schema=CONTEXT_SCHEMA
             if journal['schema']==BASES_SCHEMA or (proposal and 'step_bases' in proposal):schema=BASES_SCHEMA
+            if journal['schema']==TARGETS_SCHEMA or (proposal and (has_targets(proposal) or 'adaptation_basis' in proposal)):schema=TARGETS_SCHEMA
             journal=dict(schema=schema,revision=expected+1,events=journal['events']+[event])
             from document_store import write
             write(path,journal,'learning_intent',writer=atomic_json,limit=MAX_BYTES)

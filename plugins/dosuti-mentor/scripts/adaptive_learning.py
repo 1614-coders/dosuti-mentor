@@ -94,6 +94,64 @@ def policy():return dict(min_recheck_hours=24,first_review_days=1,later_review_d
                         limitations=['Suggestions do not change grades or prove long-term retention','Question novelty and correctness assessed by assistant; wording check alone is insufficient','No background timer or notifications'])
 
 
+def roadmap_recommendations(intent,units,journal,now):
+    """Explain existing route targets using the same criterion recommendation policy."""
+    result=dict(status='no_accepted_plan',steps=[],recommendations=[],review_reasons=[],
+                uncovered_diagnostic_gaps=[],verification='assistant_mapped_targets_not_semantic_proof')
+    progress=intent.get('learning_progress',{})
+    if not intent.get('valid') or not progress.get('valid'):
+        result.update(status='incomplete',review_reasons=['Read and repair incomplete learning evidence']);return result
+    plan=intent['plan']
+    if plan is None:return result
+    result['adaptation_basis']=dict(base_plan_revision=plan['accepted_revision'],
+        diagnostic_revision=progress['diagnostic']['revision'],unit_learning_revision=journal['revision'])
+    if plan['needs_review']:
+        result.update(status='needs_review',recommendations=[dict(action='review_route',reason='Accepted goal or route sources need review')]);return result
+    bases=plan.get('step_bases',[{} for _ in plan['steps']])
+    for basis in bases:
+        for target in basis.get('targets',[]):
+            unit=units.get(target['unit_id'])
+            if (unit is None or unit['stale'] or unit['content_sha256']!=target['unit_sha256']
+                    or any(index>len(unit['criteria']) for index in target['criteria'])):
+                result.update(status='needs_review',recommendations=[dict(action='review_route',reason='Learning target changed between reads')])
+                return result
+    result['status']='ready' if any(basis.get('targets') for basis in bases) else 'legacy_unmapped'
+    covered=set();assessments={};ranked=[]
+    for index,(title,basis) in enumerate(zip(plan['steps'],bases),1):
+        step=dict(index=index,title=title,targets=[],blocked=index in progress['blocked_steps'],
+                  completed=index in progress['completed_steps'])
+        for target in basis.get('targets',[]):
+            name=target['unit_id'];covered.add(target['competence'])
+            if name not in assessments:assessments[name]=recommendations(units[name],journal,now)
+            assessment=assessments[name]
+            rows=[row for row in assessment['criteria'] if row['criterion'] in target['criteria']]
+            demonstrated=bool(rows) and all(row['state'] in SUCCESS and row['time_valid'] for row in rows)
+            outcome=('demonstrated' if demonstrated else 'needs_practice' if any(row['state'] in
+                     ('needs_review','practice_with_help') for row in rows) else 'unverified')
+            evidence=plan.get('basis_status',{}).get('diagnostic_evidence',{})
+            step['targets'].append(dict(competence=target['competence'],rationale=target['rationale'],
+                unit=name,unit_sha256=target['unit_sha256'],criteria=rows,outcome=outcome,
+                diagnostic_evidence=[dict(revision=rev,evidence=evidence[str(rev)]['evidence'])
+                    for rev in target['diagnostic_event_revisions'] if str(rev) in evidence]))
+            if step['blocked']:continue
+            for row in rows:
+                if row['suppressed'] or row['action']=='continue_or_wait':continue
+                ranked.append(dict(step=index,step_title=title,competence=target['competence'],
+                    rationale=target['rationale'],unit=name,unit_sha256=target['unit_sha256'],**row))
+        result['steps'].append(step)
+    gaps=progress['diagnostic']['identified_gaps']
+    result['uncovered_diagnostic_gaps']=[name for name in gaps if name not in covered]
+    if result['uncovered_diagnostic_gaps']:
+        result['review_reasons'].append('Diagnostic gaps have no mapped learning targets')
+    if any(not step['targets'] for step in result['steps']):
+        result['review_reasons'].append('Some route steps have no explicit learning targets')
+    ranked.sort(key=lambda row:(row['priority'],row['step'],row['unit'],row['criterion']))
+    result['recommendations']=ranked
+    if result['review_reasons']:
+        result['recommendations'].append(dict(action='review_route',reason='; '.join(result['review_reasons'])))
+    return result
+
+
 def study_next(args):
     import course,study_units,unit_learning
     from learning_tools import learner
@@ -118,7 +176,11 @@ def study_next(args):
             suggestions.append(dict(unit=unit['id'],unit_sha256=unit['content_sha256'],prerequisites=unit['prerequisites'],**action))
     suggestions.sort(key=lambda r:(r['priority'],r['unit'],r['criterion']))
     intent_view=intent(args)
+    roadmap=roadmap_recommendations(intent_view,units,journal,now)
+    roadmap['recommendation_count']=len(roadmap['recommendations'])
+    roadmap['truncated']=len(roadmap['recommendations'])>limit
+    roadmap['recommendations']=roadmap['recommendations'][:limit]
     return dict(valid=True,profile=getattr(args,'profile','default'),session=session,journal_revision=journal['revision'],as_of=now,learning_intent=intent_view,learning_progress=intent_view['learning_progress'],
                 recommendations=suggestions[:limit],recommendation_count=len(suggestions),truncated=len(suggestions)>limit,
                 blocked=blocked[:limit],blocked_count=len(blocked),continuations=continuations[:limit],continuation_count=len(continuations),
-                policy=policy(),verification='read_only_suggestions_not_automatic_curriculum_or_grading')
+                roadmap=roadmap,policy=policy(),verification='read_only_suggestions_not_automatic_curriculum_or_grading')

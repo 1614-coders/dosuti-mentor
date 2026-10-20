@@ -90,7 +90,7 @@ def status(args,metadata,with_progress=False):
 
 def compile_route(args,card):
     import course,study_units,career_evidence
-    fields(card,'summary sample_id learner_context steps'+(' step_bases' if isinstance(card,dict) and 'step_bases' in card else ''));text(card['summary'],'route summary')
+    fields(card,'summary sample_id learner_context steps'+''.join(' '+key for key in ('step_bases','adaptation_basis') if isinstance(card,dict) and key in card));text(card['summary'],'route summary')
     draft=deepcopy(card);root=course.root(args)
     names=[]
     if not isinstance(draft['steps'],list):raise ValueError('Route steps require a list')
@@ -114,6 +114,7 @@ def compile_route(args,card):
     if 'step_bases' in draft:
         from learning_intent import validate_bases
         proposal['step_bases']=draft['step_bases'];validate_bases(proposal)
+    if 'adaptation_basis' in draft:proposal['adaptation_basis']=draft['adaptation_basis']
     return proposal
 
 
