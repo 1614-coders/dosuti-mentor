@@ -13,10 +13,18 @@ class RoadmapAdaptation(unittest.TestCase):
     def setUp(self):
         self.f=test_plan_bases.PlanBases();self.f.setUp();self.addCleanup(self.f.tearDown)
     def read(self,**kw):return intent.view(self.f.args(**kw))
-    def target(self,**kw):
-        return dict(competence='Explain a map',rationale='Practise the map criterion on a new example',
-            unit_id='maps',unit_sha256=self.f.f.f.get()['content_sha256'],criteria=[1],
-            diagnostic_event_revisions=[])|kw
+    def target(self,reviewed=True,**kw):
+        unit=self.f.f.f.get()
+        target=dict(competence='Explain a map',rationale='Practise the map criterion on a new example',
+            unit_id='maps',unit_sha256=unit['content_sha256'],criteria=[1],diagnostic_event_revisions=[])|kw
+        # Synthetic contract fixtures; semantic Java acceptance is test_target_alignment.
+        if reviewed and 'alignment_review' not in target:
+            target['alignment_review']=dict(verdict='supported',competence=target['competence'],
+                diagnostic_event_revisions=target['diagnostic_event_revisions'],diagnostic_reason='Map evidence is checked with a fresh map task.',
+                criterion_links=[dict(criterion=i,criterion_text=unit['criteria'][i-1] if type(i) is int and 1<=i<=len(unit['criteria']) else 'Invalid',
+                    source=1,quote=unit['source_contexts'][0]['text'],explanation='The selected map material supports this map criterion.')
+                    for i in target['criteria']])
+        return target
     def proposal(self,target=None,**kw):
         target=self.target() if target is None else target
         basis=dict(unit_ids=['maps'],targets=[target])
@@ -33,7 +41,7 @@ class RoadmapAdaptation(unittest.TestCase):
 
     def test_targets_persist_with_existing_journal_and_optional_diagnostic(self):
         accepted=self.accept()
-        self.assertEqual(json.loads(self.f.path.read_text())['schema'],intent.TARGETS_SCHEMA)
+        self.assertEqual(json.loads(self.f.path.read_text())['schema'],intent.ALIGNMENT_SCHEMA)
         self.assertEqual(accepted['plan']['step_bases'][0]['targets'][0],self.target())
         before=self.f.files();other=self.read(session='another')
         self.assertEqual(other['plan'],accepted['plan']);self.assertEqual(before,self.f.files())
@@ -151,7 +159,7 @@ class RoadmapAdaptation(unittest.TestCase):
         self.change({'accept_proposal':True})
         self.change({'learning_context':{'constraints':'Two evenings'}})
         self.assertEqual(self.read()['plan']['summary'],'Revised learning order')
-        self.assertEqual(json.loads(self.f.path.read_text())['schema'],intent.TARGETS_SCHEMA)
+        self.assertEqual(json.loads(self.f.path.read_text())['schema'],intent.ALIGNMENT_SCHEMA)
 
     def test_first_targeted_proposal_is_sealed_against_new_answers_before_acceptance(self):
         proposal=self.proposal();unchanged=copy.deepcopy(proposal)
@@ -222,7 +230,7 @@ class RoadmapAdaptation(unittest.TestCase):
 
     def test_old_headers_cannot_claim_targets(self):
         self.accept();journal=json.loads(self.f.path.read_text())
-        for schema in (intent.SCHEMA,intent.CAREER_SCHEMA,intent.CONTEXT_SCHEMA,intent.BASES_SCHEMA):
+        for schema in (intent.SCHEMA,intent.CAREER_SCHEMA,intent.CONTEXT_SCHEMA,intent.BASES_SCHEMA,intent.TARGETS_SCHEMA):
             self.f.path.write_text(json.dumps(dict(copy.deepcopy(journal),schema=schema)))
             self.assertFalse(self.read()['valid'])
 

@@ -120,20 +120,25 @@ def roadmap_recommendations(intent,units,journal,now):
     for index,(title,basis) in enumerate(zip(plan['steps'],bases),1):
         step=dict(index=index,title=title,targets=[],blocked=index in progress['blocked_steps'],
                   completed=index in progress['completed_steps'])
-        for target in basis.get('targets',[]):
-            name=target['unit_id'];covered.add(target['competence'])
+        for target_index,target in enumerate(basis.get('targets',[])):
+            name=target['unit_id']
+            alignment=plan['basis_status']['target_alignments'][index-1][target_index]
+            aligned=alignment['status']=='supported'
+            if aligned:covered.add(target['competence'])
+            else:result['review_reasons'].append('Review target alignment: '+target['competence'])
             if name not in assessments:assessments[name]=recommendations(units[name],journal,now)
             assessment=assessments[name]
             rows=[row for row in assessment['criteria'] if row['criterion'] in target['criteria']]
             demonstrated=bool(rows) and all(row['state'] in SUCCESS and row['time_valid'] for row in rows)
-            outcome=('demonstrated' if demonstrated else 'needs_practice' if any(row['state'] in
+            outcome=('alignment_unverified' if not aligned else 'demonstrated' if demonstrated else 'needs_practice' if any(row['state'] in
                      ('needs_review','practice_with_help') for row in rows) else 'unverified')
             evidence=plan.get('basis_status',{}).get('diagnostic_evidence',{})
             step['targets'].append(dict(competence=target['competence'],rationale=target['rationale'],
-                unit=name,unit_sha256=target['unit_sha256'],criteria=rows,outcome=outcome,
+                unit=name,unit_sha256=target['unit_sha256'],criteria=rows,outcome=outcome,alignment=alignment,
+                alignment_review=deepcopy(target.get('alignment_review')),
                 diagnostic_evidence=[dict(revision=rev,evidence=evidence[str(rev)]['evidence'])
                     for rev in target['diagnostic_event_revisions'] if str(rev) in evidence]))
-            if step['blocked']:continue
+            if step['blocked'] or not aligned:continue
             for row in rows:
                 if row['suppressed'] or row['action']=='continue_or_wait':continue
                 ranked.append(dict(step=index,step_title=title,competence=target['competence'],
@@ -177,10 +182,12 @@ def study_next(args):
     suggestions.sort(key=lambda r:(r['priority'],r['unit'],r['criterion']))
     intent_view=intent(args)
     roadmap=roadmap_recommendations(intent_view,units,journal,now)
+    valid=bool(intent_view.get('valid') and intent_view['learning_progress']['valid'])
+    if not valid:suggestions=[]
     roadmap['recommendation_count']=len(roadmap['recommendations'])
     roadmap['truncated']=len(roadmap['recommendations'])>limit
     roadmap['recommendations']=roadmap['recommendations'][:limit]
-    return dict(valid=True,profile=getattr(args,'profile','default'),session=session,journal_revision=journal['revision'],as_of=now,learning_intent=intent_view,learning_progress=intent_view['learning_progress'],
+    return dict(valid=valid,profile=getattr(args,'profile','default'),session=session,journal_revision=journal['revision'],as_of=now,learning_intent=intent_view,learning_progress=intent_view['learning_progress'],
                 recommendations=suggestions[:limit],recommendation_count=len(suggestions),truncated=len(suggestions)>limit,
                 blocked=blocked[:limit],blocked_count=len(blocked),continuations=continuations[:limit],continuation_count=len(continuations),
                 roadmap=roadmap,policy=policy(),verification='read_only_suggestions_not_automatic_curriculum_or_grading')
