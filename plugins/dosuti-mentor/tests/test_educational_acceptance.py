@@ -71,7 +71,7 @@ class EducationalAcceptance(unittest.TestCase):
     def proposal(self,unit,revisions):
         bases=[]
         for number,competence,quote in ((1,MAP,'put with an existing key replaces its value without increasing size.'),
-                                      (2,COUNT,'counts.put(word, counts.getOrDefault(word, 0) + 1)')):
+                                      (2,COUNT,'For each word: counts.put(word, counts.getOrDefault(word, 0) + 1).')):
             refs=[revisions[competence]] if competence in revisions else []
             reason=('The duplicate-key size answer counts calls instead of unique keys.' if number==1 else
                     'The learner cannot retain and increment the previous count.')
@@ -134,7 +134,7 @@ class EducationalAcceptance(unittest.TestCase):
         j.decide(dict(proposal=proposal));self.assertIsNone(intent.view(j.args())['plan'])
         accepted=j.decide(dict(accept_proposal=True))
         self.assertEqual(accepted['learning_progress']['blocked_steps'],[2])
-        self.assertEqual(adaptive_learning.study_next(j.args(limit=10))['roadmap']['uncovered_diagnostic_gaps'],[LOOP,NULL])
+        self.assertEqual(adaptive_learning.study_next(j.args(limit=10))['roadmap']['uncovered_diagnostic_gaps'],summary['identified_gaps'])
         self.attempt('explained',None,None,[])
         self.assertEqual(intent.view(j.args())['learning_progress']['completed_steps'],[])
         self.attempt('needs_review','put(a,2);put(a,3): size?','2',[1])
@@ -143,13 +143,15 @@ class EducationalAcceptance(unittest.TestCase):
         self.assertEqual(adaptive_learning.study_next(j.args(limit=10))['roadmap']['recommendations'][0]['action'],'fresh_independent_task')
         self.attempt('solved_independently','put(a,4);put(b,8);put(a,9): value(a), size?','9 and 2: a is replaced',[1])
         progress=intent.view(j.args())['learning_progress']
-        self.assertEqual(progress['completed_steps'],[1]);self.assertEqual(progress['next_step']['index'],2)
+        self.assertEqual(progress['criterion_completed_steps'],[1]);self.assertEqual(progress['next_step']['index'],2)
+        self.assertEqual(progress['completed_steps'],[])
         self.assertEqual(progress['demonstrated_units'],[])
         self.attempt('solved_independently','Implement counts for each word without hints.',
             'for(String w:words) counts.put(w,counts.getOrDefault(w,0)+1);',[2])
-        self.assertEqual(intent.view(j.args())['learning_progress']['completed_steps'],[1,2])
+        self.assertEqual(intent.view(j.args())['learning_progress']['criterion_completed_steps'],[1,2])
+        self.assertEqual(intent.view(j.args())['learning_progress']['completed_steps'],[])
         remaining=adaptive_learning.study_next(j.args(limit=10))['roadmap']
-        self.assertEqual(remaining['uncovered_diagnostic_gaps'],[LOOP,NULL])
+        self.assertEqual(remaining['uncovered_diagnostic_gaps'],summary['identified_gaps'])
         self.assertTrue(any(row['action']=='review_route' for row in remaining['recommendations']))
 
         checkpoint=dict(recap='Both map criteria demonstrated',next_step='Review map transfer later',pending_question=None)
@@ -176,7 +178,8 @@ class EducationalAcceptance(unittest.TestCase):
         returned=unit_learning.learn_unit(j.args(unit_id='example',session='chat-b',history_limit=20))
         self.assertEqual(returned['learning_progress'],resumed)
         self.assertEqual(returned['learning']['checkpoint']['event']['value']['next_step'],'Independent chat-b review')
-        self.assertEqual(self.cli('intent')['learning_progress']['completed_steps'],[1,2])
+        self.assertEqual(self.cli('intent')['learning_progress']['criterion_completed_steps'],[1,2])
+        self.assertEqual(self.cli('intent')['learning_progress']['completed_steps'],[])
 
         protected=[learning.pref_file(j.args(),'profile'),diagnostic.path_for(j.args()),intent.path_for(j.args()),
             j.fixture.path/'learners/journey/unit-learning.json',j.fixture.path/'study-units.json']

@@ -43,8 +43,10 @@ class TargetAlignment(unittest.TestCase):
     def test_reviewed_map_mapping_retains_real_criterion_results_and_history(self):
         self.accept(self.r.target(alignment_review=self.review()))
         self.solve_map();before=self.f.files();result=self.r.next()
-        self.assertEqual(result['steps'][0]['targets'][0]['outcome'],'demonstrated')
-        self.assertEqual(self.r.read()['learning_progress']['completed_steps'],[1])
+        self.assertEqual(result['steps'][0]['targets'][0]['outcome'],'criteria_demonstrated')
+        self.assertEqual(self.r.read()['learning_progress']['criterion_completed_steps'],[1])
+        self.assertEqual(self.r.read()['learning_progress']['completed_steps'],[])
+        self.assertEqual(result['steps'][0]['targets'][0]['competence_status'],'unverified')
         self.assertEqual(before,self.f.files())
         self.assertEqual(json.loads(self.f.path.read_text())['schema'],intent.ALIGNMENT_SCHEMA)
         self.assertTrue(self.r.read(session='other')['valid'])
@@ -93,7 +95,8 @@ class TargetAlignment(unittest.TestCase):
         self.r.change({'proposal':self.r.proposal(self.r.target(alignment_review=self.review()),adaptation_basis=self.r.snapshot())})
         self.assertEqual(self.r.read()['plan'],accepted)
         self.r.change({'accept_proposal':True})
-        self.assertEqual(self.r.read()['learning_progress']['completed_steps'],[1])
+        self.assertEqual(self.r.read()['learning_progress']['criterion_completed_steps'],[1])
+        self.assertEqual(self.r.read()['learning_progress']['completed_steps'],[])
         self.r.change({'learning_context':{'constraints':'Weekends'}})
         journal=json.loads(self.f.path.read_text())
         self.assertEqual(journal['schema'],intent.ALIGNMENT_SCHEMA)
@@ -113,7 +116,8 @@ class TargetAlignment(unittest.TestCase):
             sources=[dict(kind='video',role='teacher',notes='Reviewed speech',lesson='lesson-01',start=0,end=20)]))
         review=self.review();review['criterion_links'][0]['quote']='put replaces the existing value'
         self.accept(self.r.target(alignment_review=review));self.solve_map()
-        self.assertEqual(self.r.read()['learning_progress']['completed_steps'],[1])
+        self.assertEqual(self.r.read()['learning_progress']['criterion_completed_steps'],[1])
+        self.assertEqual(self.r.read()['learning_progress']['completed_steps'],[])
 
     def test_v5_header_cannot_claim_a_review(self):
         self.accept(self.r.target(alignment_review=self.review()))

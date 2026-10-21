@@ -39,7 +39,9 @@ class IncompleteIntent(unittest.TestCase):
                 self.assertEqual(advice['roadmap']['status'],'incomplete')
                 self.assertEqual(before,self.f.f.files())
         path.write_bytes(original)
-        self.assertEqual(intent.view(self.f.f.args())['learning_progress']['completed_steps'],[1])
+        restored=intent.view(self.f.f.args())['learning_progress']
+        self.assertEqual(restored['criterion_completed_steps'],[1])
+        self.assertEqual(restored['completed_steps'],[])
 
     def test_status_and_failed_intent_write_leave_corrupt_file_and_unit_answers_intact(self):
         self.f.f.path.write_text('{broken');before=self.f.f.files()

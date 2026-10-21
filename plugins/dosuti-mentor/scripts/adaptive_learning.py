@@ -116,38 +116,41 @@ def roadmap_recommendations(intent,units,journal,now):
                 result.update(status='needs_review',recommendations=[dict(action='review_route',reason='Learning target changed between reads')])
                 return result
     result['status']='ready' if any(basis.get('targets') for basis in bases) else 'legacy_unmapped'
-    covered=set();assessments={};ranked=[]
+    assessments={};ranked=[]
     for index,(title,basis) in enumerate(zip(plan['steps'],bases),1):
         step=dict(index=index,title=title,targets=[],blocked=index in progress['blocked_steps'],
-                  completed=index in progress['completed_steps'])
+                  completed=index in progress['completed_steps'],
+                  criteria_completed=index in progress['criterion_completed_steps'])
         for target_index,target in enumerate(basis.get('targets',[])):
             name=target['unit_id']
             alignment=plan['basis_status']['target_alignments'][index-1][target_index]
-            aligned=alignment['status']=='supported'
-            if aligned:covered.add(target['competence'])
-            else:result['review_reasons'].append('Review target alignment: '+target['competence'])
+            reviewed=bool(alignment.get('evidence_valid') and alignment.get('review_verdict')=='supported')
+            result['review_reasons'].append('Competence alignment remains unverified: '+target['competence'])
             if name not in assessments:assessments[name]=recommendations(units[name],journal,now)
             assessment=assessments[name]
             rows=[row for row in assessment['criteria'] if row['criterion'] in target['criteria']]
             demonstrated=bool(rows) and all(row['state'] in SUCCESS and row['time_valid'] for row in rows)
-            outcome=('alignment_unverified' if not aligned else 'demonstrated' if demonstrated else 'needs_practice' if any(row['state'] in
+            outcome=('alignment_unverified' if not reviewed else 'criteria_demonstrated' if demonstrated else 'needs_practice' if any(row['state'] in
                      ('needs_review','practice_with_help') for row in rows) else 'unverified')
             evidence=plan.get('basis_status',{}).get('diagnostic_evidence',{})
             step['targets'].append(dict(competence=target['competence'],rationale=target['rationale'],
                 unit=name,unit_sha256=target['unit_sha256'],criteria=rows,outcome=outcome,alignment=alignment,
+                competence_status='unverified',
                 alignment_review=deepcopy(target.get('alignment_review')),
                 diagnostic_evidence=[dict(revision=rev,evidence=evidence[str(rev)]['evidence'])
                     for rev in target['diagnostic_event_revisions'] if str(rev) in evidence]))
-            if step['blocked'] or not aligned:continue
+            if step['blocked'] or not reviewed:continue
             for row in rows:
                 if row['suppressed'] or row['action']=='continue_or_wait':continue
                 ranked.append(dict(step=index,step_title=title,competence=target['competence'],
+                    competence_status='unverified',completion_scope='unit_criteria_only',
                     rationale=target['rationale'],unit=name,unit_sha256=target['unit_sha256'],**row))
         result['steps'].append(step)
     gaps=progress['diagnostic']['identified_gaps']
-    result['uncovered_diagnostic_gaps']=[name for name in gaps if name not in covered]
+    # A cited model judgement cannot remove a diagnostic gap.
+    result['uncovered_diagnostic_gaps']=list(gaps)
     if result['uncovered_diagnostic_gaps']:
-        result['review_reasons'].append('Diagnostic gaps have no mapped learning targets')
+        result['review_reasons'].append('Mapped criterion results do not independently verify diagnostic gaps')
     if any(not step['targets'] for step in result['steps']):
         result['review_reasons'].append('Some route steps have no explicit learning targets')
     ranked.sort(key=lambda row:(row['priority'],row['step'],row['unit'],row['criterion']))

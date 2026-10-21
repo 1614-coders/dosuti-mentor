@@ -170,10 +170,14 @@ def target_alignment(root,unit,target):
             # Cite actual content, never annotations, titles or source review notes.
             passages=([context['text']] if isinstance(context.get('text'),str) else [])
             passages += [row['text'] for row in context.get('context',{}).get('speech',[]) if isinstance(row.get('text'),str)]
-            if not any(link['quote'] in passage for passage in passages):
-                reasons.append('Alignment quote is absent from selected source content')
+            # A citation must preserve complete source lines/ASR segments, not
+            # match an arbitrary substring. This checks provenance, not meaning.
+            if not any('\n'+link['quote']+'\n' in '\n'+passage+'\n' for passage in passages):
+                reasons.append('Alignment quote must preserve complete source lines or speech segments')
         except (ValueError,OSError) as error:reasons.append(str(error))
-    return dict(status='invalid' if reasons else review['verdict'],reasons=reasons)
+    return dict(status='invalid' if reasons else 'unverified' if review['verdict']=='supported' else review['verdict'],
+                reasons=reasons,review_verdict=review['verdict'],evidence_valid=not reasons,
+                verification='citation_integrity_only_not_semantic_validation')
 
 
 def basis_status(args,plan):
@@ -250,7 +254,7 @@ def learning_progress(args, intent):
                 studied_lessons=[],confirmed_lesson_knowledge=[],completed_lesson_tasks=[],
                 completed_unit_tasks=[],lesson_history=[],unit_history=[],
                 continuations=[],continuation_choice_required=False,
-                completed_steps=[],blocked_steps=[],current_step=None,next_step=None,stopped_at=None,
+                completed_steps=[],criterion_completed_steps=[],blocked_steps=[],current_step=None,next_step=None,stopped_at=None,
                 limitations=['recorded_evidence_not_automatic_grading'])
     if not diagnostic.get('valid'):
         result.update(valid=False, reason='diagnostic: '+diagnostic['reason'])
@@ -345,20 +349,27 @@ def learning_progress(args, intent):
                   'practice_partially_confirmed' if 'needs_practice' in findings else
                   'confirm_transfer' if 'confirmed' in findings else 'no_diagnostic_evidence')
         completed=bool(unit_ids) and all(states.get(name,{}).get('demonstrated') for name in unit_ids)
+        criteria_completed=completed
         targets=basis.get('targets',[])
         if targets:
             alignments=plan['basis_status']['target_alignments'][index-1]
-            completed=all(alignment['status']=='supported' for alignment in alignments) and all(all(any(row['criterion']==index and row['state'] in ('solved_independently','checked_later')
+            criteria_completed=all(alignment.get('evidence_valid') and alignment.get('review_verdict')=='supported'
+                for alignment in alignments) and all(all(any(row['criterion']==index and row['state'] in ('solved_independently','checked_later')
                 and row['time_valid'] for row in states.get(target['unit_id'],{}).get('adaptive',[]))
                 for index in target['criteria']) for target in targets)
+            # A model's mapping is not an independent proof of competence.
+            # Keep task progression without asserting the mapped step was mastered.
+            completed=False
         steps.append(dict(index=index,title=title,unit_ids=unit_ids,prerequisites=prerequisites,
-                          diagnostic_guidance=guidance,completed=completed))
+                          diagnostic_guidance=guidance,completed=completed,criteria_completed=criteria_completed,
+                          competence_status='unverified',completion_scope='unit_criteria_only'))
     result['completed_steps']=[step['index'] for step in steps if step['completed']]
+    result['criterion_completed_steps']=[step['index'] for step in steps if step['criteria_completed']]
     for step in steps:
-        if any(not steps[number-1]['completed'] or number in result['blocked_steps'] for number in step['prerequisites']):
+        if any(not steps[number-1]['criteria_completed'] or number in result['blocked_steps'] for number in step['prerequisites']):
             result['blocked_steps'].append(step['index'])
     for step in steps:
-        if step['completed'] or step['index'] in result['blocked_steps']:continue
+        if step['criteria_completed'] or step['index'] in result['blocked_steps']:continue
         result['current_step']=step
         result['next_step']=step
         break

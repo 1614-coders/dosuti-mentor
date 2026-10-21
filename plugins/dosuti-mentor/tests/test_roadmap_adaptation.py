@@ -75,8 +75,9 @@ class RoadmapAdaptation(unittest.TestCase):
         advice=self.next()['recommendations'][0]
         self.assertEqual(advice['action'],'review_error');self.assertEqual(advice['competence'],'Explain a map')
         self.assertIsNotNone(advice['evidence_revision'])
-        self.f.f.save();self.assertEqual(self.read()['learning_progress']['completed_steps'],[1])
-        self.assertEqual(self.next()['steps'][0]['targets'][0]['outcome'],'demonstrated')
+        self.f.f.save();self.assertEqual(self.read()['learning_progress']['criterion_completed_steps'],[1])
+        self.assertEqual(self.read()['learning_progress']['completed_steps'],[])
+        self.assertEqual(self.next()['steps'][0]['targets'][0]['outcome'],'criteria_demonstrated')
         self.f.f.save(self.f.f.event(stage='needs_review'))
         self.assertEqual(self.next()['recommendations'][0]['action'],'review_error')
 
@@ -89,7 +90,8 @@ class RoadmapAdaptation(unittest.TestCase):
         self.change({'accept_proposal':True})
         self.assertEqual(self.read()['learning_progress']['diagnostic']['identified_gaps'],['Explain a map'])
         before=diagnostic.path_for(self.f.args()).read_bytes();self.f.f.save()
-        self.assertEqual(self.next()['steps'][0]['targets'][0]['outcome'],'demonstrated')
+        self.assertEqual(self.next()['steps'][0]['targets'][0]['outcome'],'criteria_demonstrated')
+        self.assertEqual(self.next()['uncovered_diagnostic_gaps'],['Explain a map'])
         self.assertEqual(diagnostic.path_for(self.f.args()).read_bytes(),before)
 
     def test_targeted_criteria_allow_next_topic_without_claiming_entire_unit_mastered(self):
@@ -99,10 +101,12 @@ class RoadmapAdaptation(unittest.TestCase):
             dict(unit_ids=['maps'],targets=[first]),dict(unit_ids=['maps'],targets=[second],prerequisites=[1])])})
         self.change({'accept_proposal':True})
         before=self.next()
-        self.assertEqual({row['step'] for row in before['recommendations']}, {1})
+        self.assertEqual({row['step'] for row in before['recommendations'] if 'step' in row}, {1})
+        self.assertTrue(any(row['action']=='review_route' for row in before['recommendations']))
         self.f.f.save()
         after=self.read()['learning_progress']
-        self.assertEqual(after['completed_steps'],[1]);self.assertEqual(after['next_step']['index'],2)
+        self.assertEqual(after['criterion_completed_steps'],[1]);self.assertEqual(after['next_step']['index'],2)
+        self.assertEqual(after['completed_steps'],[])
         self.assertEqual(after['demonstrated_units'],[])
         self.assertEqual(self.next()['recommendations'][0]['step'],2)
 
@@ -117,7 +121,7 @@ class RoadmapAdaptation(unittest.TestCase):
         path.write_text(json.dumps(dict(choice='skip',criteria=[1],until=None,reason='Learner chose to skip')))
         unit_learning.learn_unit(self.f.f.args(review_file=path,expected_revision=state['learning']['revision'],
             expected_unit_sha256=state['unit']['content_sha256']))
-        self.assertEqual(self.next()['recommendations'],[])
+        self.assertTrue(all(row['action']=='review_route' for row in self.next()['recommendations']))
         self.assertEqual(self.read()['plan'],accepted)
 
     def test_new_diagnostic_or_goal_invalidates_pending_adaptation(self):
