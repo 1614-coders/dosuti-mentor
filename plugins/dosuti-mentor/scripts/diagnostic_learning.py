@@ -4,6 +4,7 @@ from pathlib import Path
 from profile_storage import checked
 from storage_lock import file_lock
 from learning_intent import text
+from read_snapshot import cached
 
 SCHEMA = 'diagnostic_learning_v1'
 MAX_BYTES = 64 * 1024 * 1024
@@ -137,6 +138,7 @@ def apply(attempts, event):
     current['revision'] = event['revision']
 
 
+@cached
 def load(path):
     from document_store import read
     from adaptive_learning import timestamp

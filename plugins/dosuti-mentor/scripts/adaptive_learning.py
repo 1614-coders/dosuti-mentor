@@ -161,6 +161,18 @@ def roadmap_recommendations(intent,units,journal,now):
 
 
 def study_next(args):
+    from read_snapshot import snapshot, SnapshotChanged
+    for _ in range(3):
+        try:
+            with snapshot():
+                return _study_next(args)
+        except SnapshotChanged:
+            pass
+    return dict(valid=False,reason='Learning data changed during study-next; no consistent read after 3 attempts',
+                recommendations=[],recovery='Retry study-next after the other chat finishes saving')
+
+
+def _study_next(args):
     import course,study_units,unit_learning
     from learning_tools import learner
     from learning_intent import view as intent
@@ -169,9 +181,9 @@ def study_next(args):
     if type(limit) is not int or not 1<=limit<=20:raise ValueError('limit must be 1..20')
     session=getattr(args,'session',None)
     if session is not None:course.slug(session)
-    try:journal=unit_learning.load(folder/'unit-learning.json',compact=True)
+    try:journal=unit_learning.load(folder/'unit-learning.json',compact=True,history_limit=100)
     except (ValueError,OSError) as error:return dict(valid=False,reason=str(error),recommendations=[],recovery='Preserve and repair learner journal before using recommendations')
-    registry=study_units.load(root);units=study_units.checked_units(root,registry,include_contexts=False);now=course.now()
+    registry=study_units.load(root,include_history=False);units=study_units.checked_units(root,registry,include_contexts=False);now=course.now()
     suggestions=[];blocked=[];continuations=[];by_unit={}
     for event in journal['events']:by_unit.setdefault(event['unit'],[]).append(event)
     for unit in units.values():

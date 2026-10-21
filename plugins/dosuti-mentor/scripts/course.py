@@ -20,6 +20,7 @@ from preparation_control import run as preparation_run
 from storage_paths import source_kind, local_path, anchored, resolved
 from source_integrity import (digest, source_matches, verify_evidence, check_local_video,
                               seal_snapshot, verify_snapshot)
+from read_snapshot import observed, watch
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 
@@ -34,6 +35,7 @@ def slug(value):
     return value
 
 
+@observed
 def read(path):
     path = Path(path)
     value = json.loads(path.read_text(encoding='utf-8'))
@@ -176,6 +178,7 @@ def read_progress(args):
     from profile_storage import profile_path, checked
     path=profile_path(root(args),getattr(args,'profile','default'))/'progress.sqlite3'
     result=dict(progress=[],events=[],event_count=0,chat_bindings=[])
+    for suffix in ('','-journal','-wal','-shm'):watch(Path(str(path)+suffix))
     if checked(path) is None:return result
     for suffix in ('-journal','-wal','-shm'):checked(Path(str(path)+suffix))
     # SQLite readers can write WAL shared-memory bookkeeping even with mode=ro.

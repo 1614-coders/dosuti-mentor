@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 from atomic_files import atomic_json
 from profile_storage import checked
+from read_snapshot import watch
 
 SCHEMA='unit_learning_v3'
 LIMIT=900_000
@@ -37,7 +38,7 @@ def event_stream(path,data):
             from source_integrity import digest
             digest(entry['sha256']);p=folder/(entry['sha256']+'.json');checked(p)
             if not p.is_file() or p.stat().st_size>LIMIT:raise ValueError('Learning segment missing or too large')
-            raw=p.read_bytes()
+            watch(p);raw=p.read_bytes();watch(p)
             if hashlib.sha256(raw).hexdigest()!=entry['sha256']:raise ValueError('Learning segment checksum changed')
             segment=json.loads(raw)
             if not isinstance(segment,list) or len(segment)!=entry['count']:raise ValueError('Invalid learning segment count')

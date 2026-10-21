@@ -4,6 +4,7 @@ from pathlib import Path
 from atomic_files import atomic_json
 from profile_storage import checked
 from storage_lock import file_lock
+from read_snapshot import cached
 
 LEGACY_SCHEMA='unit_learning_v1'
 SCHEMA='unit_learning_v2'
@@ -58,6 +59,7 @@ def validate(value,kind):
     else:raise ValueError('Unknown unit learning event type')
 
 
+@cached
 def load(path,unit_id=None,compact=False,history_limit=0):
     import course
     from learning_tools import read_json

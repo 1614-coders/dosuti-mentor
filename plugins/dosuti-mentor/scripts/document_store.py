@@ -10,6 +10,7 @@ import codecs
 from pathlib import Path
 from atomic_files import atomic_json
 from profile_storage import checked
+from read_snapshot import watch
 
 SCHEMA='document_parts_v1'
 INLINE_BYTES=900_000
@@ -47,7 +48,9 @@ def read(path,default,kind,project=None):
     for item in value['parts']:
         p=directory/(item['sha256']+'.part');checked(p)
         if not p.is_file() or p.stat().st_size!=item['bytes']:raise ValueError('Document part missing or size changed')
+        watch(p)
         with p.open('rb') as stream:raw=stream.read(PART_BYTES+1)
+        watch(p)
         if len(raw)!=item['bytes'] or hashlib.sha256(raw).hexdigest()!=item['sha256']:raise ValueError('Document part checksum changed')
         checksum.update(raw);chunks.append(raw if project else decoder.decode(raw))
     if checksum.hexdigest()!=value['sha256']:raise ValueError('Document checksum changed')

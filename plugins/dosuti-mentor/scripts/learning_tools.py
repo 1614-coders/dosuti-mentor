@@ -58,6 +58,9 @@ def onboarding_comment(value):
     return value
 
 
+from read_snapshot import observed
+
+@observed
 def read_json(path, default=None):
     if not path.exists():
         return default

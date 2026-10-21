@@ -6,6 +6,7 @@ from pathlib import Path
 from atomic_files import atomic_json
 from profile_storage import checked
 from storage_lock import file_lock
+from read_snapshot import cached
 
 SCHEMA='study_units_v1'
 MAX_UNITS=500
@@ -90,6 +91,7 @@ def validate_history(event):
         raise ValueError('Invalid historical unit identity')
 
 
+@cached
 def load(root,include_history=True):
     from learning_tools import read_json
     path=root/'study-units.json';checked(path)
