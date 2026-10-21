@@ -171,7 +171,9 @@ def settings(args):
                 for question in ONBOARDING_QUESTIONS:
                     answers.setdefault(question,dict(status='skipped'))
             elif additions:
-                onboarding='complete' if len(answers)==len(ONBOARDING_QUESTIONS) else 'in_progress'
+                # Editing one legacy answer must not restart a finished survey.
+                onboarding=('complete' if len(answers)==len(ONBOARDING_QUESTIONS) else
+                            onboarding if args.onboarding is None and onboarding in ('complete','skipped') else 'in_progress')
             if args.onboarding=='complete' and len(answers)!=len(ONBOARDING_QUESTIONS):
                 raise ValueError('Cannot complete unresolved onboarding questions')
             if 'comment' in update:comment=update['comment']
