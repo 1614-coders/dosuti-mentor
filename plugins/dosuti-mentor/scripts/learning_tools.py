@@ -28,9 +28,19 @@ def onboarding_answers(value):
     for question, record in value.items():
         if not isinstance(record,dict):raise ValueError('Invalid onboarding answer record')
         if record == dict(status='skipped'):continue
-        if set(record)!={'status','value'} or record['status']!='answered':
+        if (not {'status','value'}<=set(record) or set(record)-{'status','value','text','area','direction'}
+                or record['status'] not in ('answered','clarifying')
+                or (question!='subject' and set(record)&{'area','direction'})):
             raise ValueError('Invalid onboarding answer record')
+        for field in ('text','area','direction'):
+            if field in record and (not isinstance(record[field],str) or not record[field].strip() or len(record[field])>4000):
+                raise ValueError('Invalid onboarding '+field)
+        if record['status']=='clarifying' and 'direction' in record:
+            raise ValueError('A known direction does not need subject clarification')
         answer=record['value']; choices=ONBOARDING_QUESTIONS[question]
+        if answer is None:
+            if 'text' not in record:raise ValueError('Free onboarding answer requires actual text')
+            continue
         if question=='subject':
             if not isinstance(answer,str) or not answer.strip() or len(answer)>4000:
                 raise ValueError('Invalid onboarding subject')
@@ -47,9 +57,42 @@ def onboarding_answers(value):
                     or any(not isinstance(item,str) or item not in choices for item in answer)
                     or len(answer)!=len(set(answer)) or not (answer or details.strip())):
                 raise ValueError('Invalid onboarding selection')
-        elif not isinstance(answer,str) or answer not in choices:
-            raise ValueError('Invalid onboarding choice: '+question)
+        else:
+            selected=answer if isinstance(answer,list) else [answer]
+            if (not selected or len(selected)>len(choices)
+                    or any(not isinstance(v,str) or v not in choices for v in selected)
+                    or len(set(selected))!=len(selected)):
+                raise ValueError('Invalid onboarding choice: '+question)
     return value
+
+
+def onboarding_record(answer):
+    if isinstance(answer,dict) and set(answer)&{'value','text','area','direction','pending'}:
+        if set(answer)-{'value','text','area','direction','pending'} or type(answer.get('pending',False)) is not bool:
+            raise ValueError('Invalid onboarding answer fields')
+        return dict(status='clarifying' if answer.get('pending') else 'answered',
+                    value=answer.get('value'),**{k:v for k,v in answer.items() if k not in ('value','pending')})
+    return dict(status='answered',value=answer)
+
+
+def onboarding_message(onboarding, answers, next_question):
+    if next_question is None:return None
+    copy=(Path(__file__).parents[1]/'references/onboarding-dialog.md').read_text(encoding='utf-8')
+    def block(heading):
+        return copy.split(heading+'\n',1)[1].split('\n### ',1)[0].split('\n## ',1)[0].strip()
+    index=list(ONBOARDING_QUESTIONS).index(next_question)+1
+    heading=f'### Вопрос {index} из 8'
+    message=heading+'\n\n'+block(heading)
+    record=answers.get(next_question,{})
+    if record.get('status')=='clarifying':
+        area=record.get('area',record.get('value'))
+        clarify='### Уточнение: '+(area if isinstance(area,str) else 'Другая область')
+        if clarify+'\n' not in copy:clarify='### Уточнение: Другая область'
+        message=heading+'\n\n'+(block(clarify) if next_question=='subject' else
+            'Расскажи свой вариант своими словами. Можно также написать «Пропустить».')
+    if onboarding=='not_asked' and not answers:
+        message=block('## Приветствие')+'\n\n'+message
+    return message
 
 
 def onboarding_comment(value):
@@ -123,10 +166,12 @@ def preferences(args):
             comment = onboarding_comment(data.get('onboarding_comment',''))
             if onboarding not in ONBOARDING_STATES:
                 raise ValueError('Invalid onboarding state')
-    pending = [] if onboarding in ('complete','skipped') else [question for question in ONBOARDING_QUESTIONS if question not in answers]
+    pending = [q for q in ONBOARDING_QUESTIONS if answers.get(q,{}).get('status')=='clarifying'
+                or (onboarding not in ('complete','skipped') and q not in answers)]
     return dict(effective=result,layers=layers,onboarding=onboarding,
                 onboarding_answers=answers,onboarding_comment=comment,
-                onboarding_pending=pending,onboarding_next=pending[0] if pending else None)
+                onboarding_pending=pending,onboarding_next=pending[0] if pending else None,
+                onboarding_message=onboarding_message(onboarding,answers,pending[0] if pending else None))
 
 
 def settings(args):
@@ -147,7 +192,7 @@ def settings(args):
             raise ValueError('Invalid onboarding update')
         raw_answers=update.get('answers',{})
         if not isinstance(raw_answers,dict):raise ValueError('Invalid onboarding answers')
-        additions={key:dict(status='answered',value=value) for key,value in raw_answers.items()}
+        additions={key:onboarding_record(value) for key,value in raw_answers.items()}
         if (not isinstance(skips,list) or any(not isinstance(q,str) or q not in ONBOARDING_QUESTIONS for q in skips)
                 or len(skips)!=len(set(skips)) or set(skips)&set(additions)):
             raise ValueError('Invalid onboarding skips')
@@ -166,15 +211,29 @@ def settings(args):
             if onboarding not in ONBOARDING_STATES:raise ValueError('Invalid onboarding state')
             answers=dict(onboarding_answers(current.get('onboarding_answers',{})))
             comment=onboarding_comment(current.get('onboarding_comment',''))
+            legacy_finished=onboarding in ('complete','skipped') and len(answers)<len(ONBOARDING_QUESTIONS)
+            previous=answers.get('subject',{}); incoming=additions.get('subject',{})
+            if previous.get('status')=='clarifying' and incoming.get('status') in ('answered','clarifying'):
+                incoming=dict(incoming)
+                if 'area' in previous:incoming.setdefault('area',previous['area'])
+                if previous.get('text'):
+                    incoming.setdefault('text',previous['text'])
+                    if incoming['text']!=previous['text'] and not incoming['text'].startswith(previous['text']+'\n'):
+                        incoming['text']=previous['text']+'\n'+incoming['text']
+                additions['subject']=incoming
             answers.update(additions)
+            onboarding_answers(answers)
             if args.onboarding=='skipped':
                 for question in ONBOARDING_QUESTIONS:
                     answers.setdefault(question,dict(status='skipped'))
             elif additions:
                 # Editing one legacy answer must not restart a finished survey.
-                onboarding=('complete' if len(answers)==len(ONBOARDING_QUESTIONS) else
+                onboarding=(onboarding if legacy_finished else
+                            'in_progress' if any(r['status']=='clarifying' for r in answers.values()) else
+                            'complete' if len(answers)==len(ONBOARDING_QUESTIONS) else
                             onboarding if args.onboarding is None and onboarding in ('complete','skipped') else 'in_progress')
-            if args.onboarding=='complete' and len(answers)!=len(ONBOARDING_QUESTIONS):
+            if args.onboarding=='complete' and (len(answers)!=len(ONBOARDING_QUESTIONS)
+                    or any(r['status']=='clarifying' for r in answers.values())):
                 raise ValueError('Cannot complete unresolved onboarding questions')
             if 'comment' in update:comment=update['comment']
             saved=dict(values=values,revision=revision(current)+1,onboarding=onboarding)

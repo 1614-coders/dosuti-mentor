@@ -226,12 +226,37 @@ def view(args):
                 verification='assistant_recorded_evidence_not_automatic_grading')
 
 
+def starting_guidance(args):
+    from learning_tools import preferences
+    from learning_intent import load as load_intent, path_for as intent_path
+    try:
+        answers=preferences(args)['onboarding_answers']
+        _, intent=load_intent(intent_path(args))
+        level=answers.get('self_assessment',{}).get('value')
+        if not isinstance(level,str):level=None
+        levels=dict(zero='basic',basics='basic',basic_experience='applied',
+                    confident='applied',significant_experience='transfer',unknown='basic')
+        return dict(valid=True,difficulty=levels.get(level,'basic'),
+            calibration=level is None or level=='unknown',
+            subject=deepcopy(answers.get('subject',{})),
+            self_assessment=deepcopy(answers.get('self_assessment',{})),
+            outcome=deepcopy(answers.get('outcome',{})),goal=deepcopy(intent['goal']),
+            verification='self_report_for_question_selection_not_competence_evidence')
+    except (ValueError,OSError) as error:
+        return dict(valid=False,reason=str(error))
+
+
 def diagnostic(args):
     import course
     from learning_tools import read_json
     incoming = getattr(args, 'update_file', None)
     if incoming:
-        value = validate(read_json(incoming), new=True); text(getattr(args, 'reason', None), 'Reason')
+        value=read_json(incoming)
+        if isinstance(value,dict) and value.get('action')=='accept' and 'next_difficulty' not in value:
+            guidance=starting_guidance(args)
+            if not guidance['valid']:raise ValueError('Cannot choose initial difficulty: '+guidance['reason'])
+            value=dict(value,next_difficulty=guidance['difficulty'])
+        value = validate(value, new=True); text(getattr(args, 'reason', None), 'Reason')
         expected = getattr(args, 'expected_revision', None)
         if type(expected) is not int or expected < 0: raise ValueError('Diagnostic write requires --expected-revision')
         view(args)  # Validate read options before writing.
@@ -248,4 +273,4 @@ def diagnostic(args):
             from document_store import write
             write(path, dict(schema=SCHEMA, revision=expected + 1, events=journal['events'] + [event]),
                   'diagnostic_learning', limit=MAX_BYTES)
-    return view(args)
+    return dict(view(args),starting_guidance=starting_guidance(args))

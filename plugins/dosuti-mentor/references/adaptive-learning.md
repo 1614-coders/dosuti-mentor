@@ -132,8 +132,19 @@ PYTHON PLUGIN_ROOT/scripts/course.py diagnostic --course COURSE --profile USER -
 не генерирует тесты и не проверяет правильность сам.
 
 ```json
-{"action":"accept","competences":["Проследить выполнение цикла","Объяснить уникальность ключа в map"],"next_difficulty":"basic"}
+{"action":"accept","competences":["Проследить выполнение цикла","Объяснить уникальность ключа в map"]}
 ```
+
+В diagnostic CLI начальный next_difficulty можно опустить: он выбирается по
+самооценке из preferences (zero/basics → basic, basic_experience/confident → applied,
+significant_experience → transfer; неизвестное — basic для калибровки). Перед согласием
+прочитай starting_guidance: предмет, direction/area, фактический text, цель и самооценка.
+Выбор предметной задачи и её конкретность обеспечивает наставник по start-learning.md.
+Не давай продвинутому Java-ученику начальное определение переменной по умолчанию.
+В событии сохраняется обычный полный accept, diagnostic_learning_v1 не меняется;
+старый явный next_difficulty поддерживается. starting_guidance относится только к
+новой попытке и не заменяет сохранённый next_difficulty после ответа или паузы.
+Ошибка требует сначала выяснить конкретный пробел; самооценка не создаёт evidence.
 
 Компетенции выбирай по цели, названной области, материалам и уже проверенным
 ответам; не используй универсальную таксономию областей. Формулируй наблюдаемое
