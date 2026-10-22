@@ -29,10 +29,11 @@ class InstallerSafety(unittest.TestCase):
     @unittest.skipUnless(PWSH,'PowerShell unavailable; Windows installer execution unverified')
     def test_installer_forwards_real_parameters_without_downloads(self):
         with tempfile.TemporaryDirectory() as temporary:
-            root=Path(temporary);shutil.copy(ROOT/'Install-DoSuti.ps1',root/'Install-DoSuti.ps1')
-            spec=root/'plugins/dosuti-mentor/references/windows-python.json'
+            root=Path(temporary);scripts=root/'scripts';scripts.mkdir()
+            shutil.copy(ROOT/'plugins/dosuti-mentor/scripts/Install-DoSuti.ps1',scripts/'Install-DoSuti.ps1')
+            spec=root/'references/windows-python.json'
             spec.parent.mkdir(parents=True);spec.write_text('{}')
-            (root/'Windows-Runtime.ps1').write_text('''
+            (scripts/'Windows-Runtime.ps1').write_text('''
 function Initialize-DoSutiHome([string]$HomePath) { return $HomePath }
 function Resolve-DoSutiPython([string]$HomePath,[string]$Explicit,$Spec,[switch]$Offline) {
  if($Explicit -ne 'fixture-python' -or -not $Offline) {throw 'parameters not forwarded'}
@@ -44,7 +45,7 @@ function Invoke-QAPython {
 }
 ''')
             literal=lambda p:"'"+str(p).replace("'","''")+"'"
-            code="[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false); $env:PROCESSOR_ARCHITECTURE='AMD64'; & "+literal(root/'Install-DoSuti.ps1')+" -HomePath "+literal(root/'данные с пробелами')+" -Python fixture-python -Offline"
+            code="[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false); $env:PROCESSOR_ARCHITECTURE='AMD64'; & "+literal(scripts/'Install-DoSuti.ps1')+" -HomePath "+literal(root/'данные с пробелами')+" -Python fixture-python -Offline"
             result=subprocess.run([PWSH,'-NoProfile','-NonInteractive','-Command',code],capture_output=True,encoding='utf-8',timeout=20)
             self.assertEqual(result.returncode,0,result.stderr)
             args=json.loads(result.stdout.strip());self.assertEqual(args[-2:],['--home',str(root/'данные с пробелами')])

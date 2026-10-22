@@ -8,6 +8,14 @@
 
 ## Чтение
 
+При явном первом start-learning без выбранного курса используй
+`learning_start.py --project PROJECT --chat CHAT_ID`: он сначала учитывает этот
+resolver, затем стандартное подключение в управляемом DATA_ROOT. Умолчание
+создаётся только при начале обучения; status/check/connect сами не наследуют его.
+Новые курсы в DATA_ROOT/courses/default, а не внутри текущего проекта.
+Явные отключения и недоступные подключения блокируют автоматическую подмену.
+После выбора используй binding; не вызывай project-connect ради каждого нового чата.
+
 ```sh
 PYTHON PLUGIN_ROOT/scripts/connection.py --project PROJECT --chat CHAT_ID
 ```

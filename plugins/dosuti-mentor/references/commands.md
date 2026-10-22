@@ -16,8 +16,19 @@ python3 PLUGIN_ROOT/scripts/bootstrap.py --home DATA_ROOT
 ```
 
 После этого используй DATA_ROOT/runtime/venv/bin/python; на Windows —
-DATA_ROOT/runtime/venv/Scripts/python.exe. Повторный запуск проверяет и безопасно
-пересобирает venv, не изменяя системный Python.
+DATA_ROOT/runtime/venv/Scripts/python.exe. Повторный запуск проверяет готовую среду
+без пересборки; неисправную сохраняет до явного ремонта. bootstrap.py --verify
+проверяет приватный Python, импорты и FFmpeg без установки. Windows-установщик
+поставляется внутри PLUGIN_ROOT/scripts/Install-DoSuti.ps1.
+
+При явном start-learning без выбранного курса:
+
+```sh
+PRIVATE_PYTHON -B PLUGIN_ROOT/scripts/learning_start.py --project PROJECT --chat CHAT_ID
+```
+
+Для чата без проекта --project не нужен. Новый стандартный курс находится в
+управляемом доме; старые подключения и явные отключения имеют приоритет.
 
 ## Приём материалов
 
