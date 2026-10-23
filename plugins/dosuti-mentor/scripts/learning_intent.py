@@ -245,6 +245,9 @@ def learning_progress(args, intent):
     summary=diagnostic.get('summary') if diagnostic.get('valid') else None
     result=dict(valid=True, route_state=(intent['plan'] or {}).get('route_state','none'),
                 diagnostic=dict(status=diagnostic.get('status'),revision=diagnostic.get('revision'),
+                                competence_map=(summary or {}).get('competence_map',[]),
+                                recommendations=(summary or {}).get('recommendations',[]),goal=intent.get('goal'),
+                                limitations=(summary or {}).get('limitations',[]),
                                 confirmed_knowledge=(summary or {}).get('confirmed_knowledge',[]),
                                 partially_confirmed_knowledge=(summary or {}).get('partially_confirmed_knowledge',[]),
                                 identified_gaps=(summary or {}).get('identified_gaps',[]),
@@ -333,8 +336,15 @@ def learning_progress(args, intent):
     result['continuation_choice_required']=len(available)>1
     if result['valid'] and len(available)==1:result['stopped_at']=available[0]
     if not result['valid'] or plan is None or plan['needs_review']:return result
-    answers={answer['revision']:answer for attempt in diagnostic.get('attempts',[])
-             for answer in attempt['answers']}
+    needed={revision for basis in plan.get('step_bases',[]) for revision in basis.get('diagnostic_event_revisions',[])}
+    evidence_cards={}
+    for attempt in diagnostic.get('attempts',[]):
+        cards={}
+        for answer in attempt['answers']:
+            if answer['revision'] not in needed:continue
+            name=answer['competence']
+            if name not in cards:cards[name]=diagnostic_learning.competence_card(attempt,name)
+            evidence_cards[answer['revision']]=cards[name]
     steps=[]
     for index,title in enumerate(plan['steps'],1):
         basis=(plan.get('step_bases') or [{} for _ in plan['steps']])[index-1]
@@ -344,10 +354,12 @@ def learning_progress(args, intent):
             unit_ids=list(dict.fromkeys(unit_ids+[unit['id'] for unit in career['units']]))
             prerequisites=list(dict.fromkeys(prerequisites+[
                 i for i,step in enumerate(plan['career']['steps'],1) if step['id'] in career['prerequisites']]))
-        findings=[answers[revision]['evidence'] for revision in basis.get('diagnostic_event_revisions',[]) if revision in answers]
-        guidance=('address_identified_gap' if 'unknown' in findings else
-                  'practice_partially_confirmed' if 'needs_practice' in findings else
-                  'confirm_transfer' if 'confirmed' in findings else 'no_diagnostic_evidence')
+        findings=[evidence_cards[revision]['status'] for revision in basis.get('diagnostic_event_revisions',[])
+                  if revision in evidence_cards]
+        guidance=('address_identified_gap' if 'gap' in findings else
+                  'practice_partially_confirmed' if 'partial' in findings else
+                  'collect_diagnostic_evidence' if 'insufficient' in findings else
+                  'advance_confirmed_scope' if findings else 'no_diagnostic_evidence')
         completed=bool(unit_ids) and all(states.get(name,{}).get('demonstrated') for name in unit_ids)
         criteria_completed=completed
         targets=basis.get('targets',[])

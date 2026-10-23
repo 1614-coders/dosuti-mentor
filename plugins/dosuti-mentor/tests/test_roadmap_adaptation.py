@@ -81,17 +81,17 @@ class RoadmapAdaptation(unittest.TestCase):
         self.f.f.save(self.f.f.event(stage='needs_review'))
         self.assertEqual(self.next()['recommendations'][0]['action'],'review_error')
 
-    def test_diagnostic_gap_is_addressed_by_learning_without_rewriting_diagnostic(self):
+    def test_legacy_uncertainty_is_preserved_without_inventing_a_gap(self):
         self.f.answer()
         self.f.diagnostic(dict(action='prompt',competence='Explain a map',prompt='Trace duplicate keys',difficulty='applied',format='open'))
         gap=self.f.diagnostic(dict(action='answer',prompt_revision=4,answer='I cannot trace it',evaluation='Key replacement is not understood',
             evidence='unknown',next_difficulty='basic',next_competence=None,selection_reason='Teach map replacement'))
         self.change({'proposal':self.proposal(self.target(diagnostic_event_revisions=[gap['revision']]))})
         self.change({'accept_proposal':True})
-        self.assertEqual(self.read()['learning_progress']['diagnostic']['identified_gaps'],['Explain a map'])
+        self.assertEqual(self.read()['learning_progress']['diagnostic']['identified_gaps'],[])
         before=diagnostic.path_for(self.f.args()).read_bytes();self.f.f.save()
         self.assertEqual(self.next()['steps'][0]['targets'][0]['outcome'],'criteria_demonstrated')
-        self.assertEqual(self.next()['uncovered_diagnostic_gaps'],['Explain a map'])
+        self.assertEqual(self.next()['uncovered_diagnostic_gaps'],[])
         self.assertEqual(diagnostic.path_for(self.f.args()).read_bytes(),before)
 
     def test_targeted_criteria_allow_next_topic_without_claiming_entire_unit_mastered(self):
@@ -133,7 +133,7 @@ class RoadmapAdaptation(unittest.TestCase):
         self.change({'goal':dict(description='New goal')})
         with self.assertRaises(ValueError):self.change({'accept_proposal':True})
 
-    def test_uncovered_gap_requests_route_review_without_inventing_mapping(self):
+    def test_legacy_uncertainty_keeps_route_review_without_inventing_gap_mapping(self):
         self.f.answer()
         self.f.diagnostic(dict(action='prompt',competence='Explain a map',prompt='Trace duplicate keys',difficulty='applied',format='open'))
         self.f.diagnostic(dict(action='answer',prompt_revision=4,answer='Unsure',evaluation='Not understood',evidence='unknown',
@@ -141,7 +141,7 @@ class RoadmapAdaptation(unittest.TestCase):
         self.change({'proposal':self.proposal(self.target(competence='Explain HTTP routing'))})
         self.change({'accept_proposal':True})
         result=self.next()
-        self.assertEqual(result['uncovered_diagnostic_gaps'],['Explain a map'])
+        self.assertEqual(result['uncovered_diagnostic_gaps'],[])
         self.assertTrue(any(row['action']=='review_route' for row in result['recommendations']))
 
     def test_legacy_plan_recommendation_does_not_write_or_fabricate_targets(self):

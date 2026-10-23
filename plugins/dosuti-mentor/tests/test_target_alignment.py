@@ -26,12 +26,20 @@ class TargetAlignment(unittest.TestCase):
         self.f.f.save(self.f.f.event(question='put("a",2);put("a",3): value and size?',
             answer='3 and 1: the second put replaces the existing value',details='Correct independent HashMap trace'))
 
+    def visibility_gap(self, competence):
+        self.f.diagnostic(dict(action='accept',competences=[competence],next_difficulty='basic'))
+        self.f.diagnostic(dict(action='prompt',competence=competence,prompt='What visibility does synchronized guarantee?',
+            difficulty='basic',format='open',rubric=dict(action='Explain synchronized visibility',
+            required=['Explain the happens-before guarantee when releasing and acquiring the same monitor'],critical_errors=[])))
+        return self.f.diagnostic(dict(action='answer',prompt_revision=2,answer='Only mutual exclusion, no visibility',
+            evaluation='The required happens-before guarantee is denied',evidence='unknown',next_difficulty='basic',next_competence=None,
+            selection_reason='Study visibility',assessment=dict(result='incorrect',met=[],unmet=[1],unverified=[],critical_errors=[],
+            assistance=dict(status='independent',details=None),verification=dict(method='assistant_review',
+                details='The actual response explicitly denies the required visibility guarantee',limitations=['One conceptual response']))))
+
     def test_unreviewed_java_mismatch_never_completes_concurrency_step(self):
         competence='Java synchronized: visibility and happens-before'
-        self.f.diagnostic(dict(action='accept',competences=[competence],next_difficulty='basic'))
-        self.f.diagnostic(dict(action='prompt',competence=competence,prompt='What visibility does synchronized guarantee?',difficulty='basic',format='open'))
-        self.f.diagnostic(dict(action='answer',prompt_revision=2,answer='Only mutual exclusion, no visibility',
-            evaluation='Missing happens-before',evidence='unknown',next_difficulty='basic',next_competence=None,selection_reason='Study visibility'))
+        self.visibility_gap(competence)
         self.accept(self.r.target(reviewed=False,competence=competence,diagnostic_event_revisions=[3]))
         self.solve_map();result=self.r.next();progress=self.r.read()['learning_progress']
         self.assertEqual(progress['demonstrated_units'],['maps'])

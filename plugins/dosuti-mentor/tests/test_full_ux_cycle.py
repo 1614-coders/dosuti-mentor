@@ -110,7 +110,8 @@ class FullUXCycle(unittest.TestCase):
             if answer is not None:
                 revisions[competence] = result['revision']
         summary = self.change('diagnostic', dict(action='complete'))['summary']
-        self.assertIn(MAP, summary['identified_gaps'])
+        self.assertEqual(summary['identified_gaps'],[])  # Legacy unknown is not an explicit incorrect assessment.
+        self.assertIn(MAP,summary['partially_confirmed_knowledge'])
         self.assertEqual(self.cli('diagnostic')['summary'], summary)
         self.unit()
         unit = self.cli('learn-unit', '--unit-id', 'map-pilot')['unit']

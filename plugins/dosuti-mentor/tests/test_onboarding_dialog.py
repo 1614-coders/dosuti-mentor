@@ -155,7 +155,7 @@ class DiagnosticStartingPoint(unittest.TestCase):
 
     def test_self_assessment_maps_to_existing_difficulty_without_evidence(self):
         for level, expected in [('zero','basic'), ('basics','basic'), ('basic_experience','applied'),
-                                ('confident','applied'), ('significant_experience','transfer'), ('unknown','basic')]:
+                                ('confident','applied'), ('significant_experience','transfer'), ('unknown',None)]:
             with self.subTest(level=level):
                 self.f.onboarding(dict(subject=dict(value='Java Backend', text='Java Backend', direction='Java Backend'), self_assessment=level))
                 state = diagnostic.diagnostic(self.f.a)

@@ -15,11 +15,7 @@ class AlignmentTrust(unittest.TestCase):
 
     def test_p1_agreeing_supported_fields_cannot_prove_concurrency_from_hashmap(self):
         competence='Java synchronized visibility and happens-before';r=self.f.r
-        r.f.diagnostic(dict(action='accept',competences=[competence],next_difficulty='basic'))
-        r.f.diagnostic(dict(action='prompt',competence=competence,prompt='Does synchronized provide visibility?',difficulty='basic',format='open'))
-        gap=r.f.diagnostic(dict(action='answer',prompt_revision=2,answer='It only excludes other threads; it gives no visibility guarantee',
-            evaluation='Visibility guarantee is denied',evidence='unknown',next_difficulty='basic',next_competence=None,
-            selection_reason='Needs visibility learning'))
+        gap=self.f.visibility_gap(competence)
         review=self.f.review();review.update(competence=competence,diagnostic_event_revisions=[gap['revision']])
         target=r.target(competence=competence,diagnostic_event_revisions=[gap['revision']],alignment_review=review)
         self.f.accept(target);self.f.solve_map();before=r.f.files()

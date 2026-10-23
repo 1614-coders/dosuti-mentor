@@ -125,9 +125,10 @@ class EducationalAcceptance(unittest.TestCase):
         finished=self.diagnose(dict(action='complete'));summary=finished['summary']
         self.assertEqual(len(finished['current']['answers']),10)
         self.assertEqual(len(finished['current']['skips']),1)
-        self.assertIn(MAP,summary['identified_gaps']);self.assertIn(COUNT,summary['identified_gaps'])
+        self.assertEqual(summary['identified_gaps'],[])  # Legacy unknown is not an explicit incorrect assessment.
+        self.assertIn(MAP,summary['partially_confirmed_knowledge'])
         self.assertIn(STRINGS,summary['partially_confirmed_knowledge'])
-        self.assertEqual(summary['unverified_areas'],[FLATMAP])
+        self.assertEqual(summary['unverified_areas'],[NULL,FLATMAP,COUNT])
         self.assertEqual(self.cli('diagnostic')['summary'],summary)
 
         unit=self.material();proposal=self.proposal(unit,revisions)

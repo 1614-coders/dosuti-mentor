@@ -198,8 +198,9 @@ class LearningJourney(unittest.TestCase):
 
         before = intent.view(self.args(session='chat-a'))['learning_progress']
         self.assertEqual(before['next_step']['title'], 'Practice assignments')
-        self.assertEqual(before['next_step']['diagnostic_guidance'], 'address_identified_gap')
-        self.assertEqual(before['diagnostic']['identified_gaps'], ['Explain assignment'])
+        self.assertEqual(before['next_step']['diagnostic_guidance'], 'collect_diagnostic_evidence')
+        self.assertEqual(before['diagnostic']['identified_gaps'], [])
+        self.assertIn('Explain assignment',before['diagnostic']['unverified_areas'])
         self.assertEqual(before['demonstrated_units'], [])
 
         self.learn(dict(stage='solved_independently', details='Correct on a new assignment',
@@ -262,8 +263,8 @@ class LearningJourney(unittest.TestCase):
         finished = self.diagnose(dict(action='complete'))
         summary = finished['summary']
         self.assertEqual(len(finished['current']['answers']), 9)
-        self.assertEqual(summary['identified_gaps'], ['Trace condition', 'Find null bug'])
-        self.assertEqual(summary['unverified_areas'], ['Read stacktrace'])
+        self.assertEqual(summary['identified_gaps'], [])
+        self.assertEqual(summary['unverified_areas'], ['Trace condition', 'Read stacktrace', 'Find null bug'])
         self.assertEqual(summary['skipped_questions'][0]['skip_reason'], 'No time in this session')
 
         card = dict(id='example', title='Assignment example', summary='Read one assignment',
@@ -280,7 +281,7 @@ class LearningJourney(unittest.TestCase):
         accepted = self.decide(dict(accept_proposal=True))
         self.assertEqual(accepted['plan']['route_state'], 'accepted')
         before = accepted['learning_progress']
-        self.assertEqual(before['next_step']['diagnostic_guidance'], 'address_identified_gap')
+        self.assertEqual(before['next_step']['diagnostic_guidance'], 'collect_diagnostic_evidence')
 
         checkpoint = dict(recap='Prepared assignment material', next_step='Solve transfer task', pending_question='What is y?')
         self.learn(checkpoint, checkpoint=True)

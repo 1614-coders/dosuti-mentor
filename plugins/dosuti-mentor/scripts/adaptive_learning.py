@@ -94,6 +94,12 @@ def policy():return dict(min_recheck_hours=24,first_review_days=1,later_review_d
                         limitations=['Suggestions do not change grades or prove long-term retention','Question novelty and correctness assessed by assistant; wording check alone is insufficient','No background timer or notifications'])
 
 
+def confirmed_scope_advice(row):
+    if row['action'] not in ('initial_check', 'check_understanding'): return row
+    return dict(row, action='check_unverified_scope',
+        reason='Diagnostic confirms observed criteria/difficulty only; check uncovered unit scope instead of default reteaching')
+
+
 def roadmap_recommendations(intent,units,journal,now):
     """Explain existing route targets using the same criterion recommendation policy."""
     result=dict(status='no_accepted_plan',steps=[],recommendations=[],review_reasons=[],
@@ -101,6 +107,10 @@ def roadmap_recommendations(intent,units,journal,now):
     progress=intent.get('learning_progress',{})
     if not intent.get('valid') or not progress.get('valid'):
         result.update(status='incomplete',review_reasons=['Read and repair incomplete learning evidence']);return result
+    diagnosis=progress['diagnostic']
+    cards={row['competence']:row for row in diagnosis.get('competence_map',[])}
+    result['proposal_guidance']=dict(goal=deepcopy(intent.get('goal')),diagnostic_revision=diagnosis['revision'],
+        recommendations=deepcopy(diagnosis.get('recommendations',[])),acceptance_required=True)
     plan=intent['plan']
     if plan is None:return result
     result['adaptation_basis']=dict(base_plan_revision=plan['accepted_revision'],
@@ -135,13 +145,16 @@ def roadmap_recommendations(intent,units,journal,now):
             evidence=plan.get('basis_status',{}).get('diagnostic_evidence',{})
             step['targets'].append(dict(competence=target['competence'],rationale=target['rationale'],
                 unit=name,unit_sha256=target['unit_sha256'],criteria=rows,outcome=outcome,alignment=alignment,
-                competence_status='unverified',
+                competence_status='unverified',diagnostic_status=cards.get(target['competence'],{}).get('status'),
+                diagnostic_confirmed_levels=cards.get(target['competence'],{}).get('confirmed_levels',[]),
                 alignment_review=deepcopy(target.get('alignment_review')),
-                diagnostic_evidence=[dict(revision=rev,evidence=evidence[str(rev)]['evidence'])
+                diagnostic_evidence=[dict(revision=rev,evidence=evidence[str(rev)]['evidence'],
+                    result=evidence[str(rev)].get('assessment',{}).get('result'))
                     for rev in target['diagnostic_event_revisions'] if str(rev) in evidence]))
             if step['blocked'] or not reviewed:continue
             for row in rows:
                 if row['suppressed'] or row['action']=='continue_or_wait':continue
+                if cards.get(target['competence'],{}).get('status')=='confirmed':row=confirmed_scope_advice(row)
                 ranked.append(dict(step=index,step_title=title,competence=target['competence'],
                     competence_status='unverified',completion_scope='unit_criteria_only',
                     rationale=target['rationale'],unit=name,unit_sha256=target['unit_sha256'],**row))
@@ -197,6 +210,9 @@ def _study_next(args):
     suggestions.sort(key=lambda r:(r['priority'],r['unit'],r['criterion']))
     intent_view=intent(args)
     roadmap=roadmap_recommendations(intent_view,units,journal,now)
+    confirmed_units={target['unit'] for step in roadmap['steps'] for target in step['targets']
+                     if target.get('diagnostic_status')=='confirmed'}
+    suggestions=[confirmed_scope_advice(row) if row['unit'] in confirmed_units else row for row in suggestions]
     valid=bool(intent_view.get('valid') and intent_view['learning_progress']['valid'])
     if not valid:suggestions=[]
     roadmap['recommendation_count']=len(roadmap['recommendations'])
