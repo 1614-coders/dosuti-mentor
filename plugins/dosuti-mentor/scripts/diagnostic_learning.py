@@ -102,7 +102,7 @@ def validate(value, *, new=False):
         'pause': set(), 'resume': set(), 'complete': set(),
     }
     extensions = {'prompt': {'format'}, 'answer': {'next_competence', 'selection_reason'}}
-    optional = {'accept': {'question_policy', 'selection_policy'}, 'prompt': {'rubric'},
+    optional = {'accept': {'question_policy', 'selection_policy','competence_prerequisites','starting_reason'}, 'prompt': {'rubric'},
                 'answer': {'assessment'}, 'skip': {'skip_reason'}}
     required = fields.get(action, set()) | {'action'}
     extra = extensions.get(action, set())
@@ -114,14 +114,21 @@ def validate(value, *, new=False):
     if action == 'accept':
         if 'question_policy' in value and value['question_policy'] != QUESTION_POLICY:
             raise ValueError('Unsupported diagnostic question policy')
-        if 'selection_policy' in value and (value['selection_policy'] != SELECTION_POLICY
+        from diagnostic_policy import POLICY,validate_graph
+        if 'selection_policy' in value and (value['selection_policy'] not in (SELECTION_POLICY,POLICY)
                 or value.get('question_policy') != QUESTION_POLICY):
-            raise ValueError('Adaptive selection requires adaptive_v1 and fixed_15_v1')
+            raise ValueError('Adaptive selection requires a supported policy and fixed_15_v1')
         names = value['competences']
         if not isinstance(names, list) or not 1 <= len(names) <= 50:
             raise ValueError('Diagnostic requires 1..50 concrete competences')
         for name in names: text(name, 'Competence', 1000)
         if len(set(names)) != len(names): raise ValueError('Competences must be unique')
+        if value.get('selection_policy')==POLICY:
+            if 'competence_prerequisites' not in value:raise ValueError('adaptive_v2 requires competence_prerequisites')
+            validate_graph(names,value['competence_prerequisites'])
+        elif 'competence_prerequisites' in value or 'starting_reason' in value:
+            raise ValueError('Prerequisites and calibration reason require adaptive_v2')
+        if 'starting_reason' in value:text(value['starting_reason'],'Starting calibration reason')
     if action == 'prompt':
         text(value['competence'], 'Competence', 1000)
         text(value['prompt'], 'Actual diagnostic prompt')
@@ -167,7 +174,9 @@ def assessed_competences(current):
 
 
 def check_selection(current, competence, prompt=None):
-    if current.get('selection_policy') != SELECTION_POLICY: return
+    from diagnostic_policy import POLICY,check_prompt
+    if current.get('selection_policy') not in (SELECTION_POLICY,POLICY): return
+    if current.get('selection_policy')==POLICY:check_prompt(current,competence)
     rows = question_history(current)
     if prompt is not None and any(row['prompt'] == prompt for row in rows):
         raise ValueError('Do not repeat an identical diagnostic prompt in this attempt')
@@ -205,7 +214,7 @@ def selection_guidance(current, starting):
     indices = assessment.get('unverified' if result == 'insufficient' else 'unmet', [])
     if action == 'independent_recheck': indices = assessment['met']
     required = (response or {}).get('rubric', {}).get('required', [])
-    return dict(valid=starting['valid'], action=action, goal=deepcopy(starting.get('goal')),
+    result=dict(valid=starting['valid'], action=action, goal=deepcopy(starting.get('goal')),
         subject=deepcopy(starting.get('subject')), last_response=deepcopy(response),
         focus_criteria=[required[i-1] for i in indices], remaining=remaining, near_end=near_end,
         unassessed_competences=unassessed, priority_competences=unassessed if near_end else [],
@@ -214,6 +223,11 @@ def selection_guidance(current, starting):
         rotation_required=streak >= 3 and any(name != rows[-1]['competence'] for name in unassessed),
         used_prompts=[row['prompt'] for row in rows],
         verification='selection_advice_not_mastery_or_automatic_question_generation')
+    from diagnostic_policy import POLICY,guidance
+    if current.get('selection_policy')==POLICY:
+        result.update(guidance(current))
+        result['priority_competences']=[n for n in result['priority_competences'] if n in result['eligible_competences']]
+    return result
 
 
 def apply(attempts, event, *, new=False):
@@ -229,6 +243,7 @@ def apply(attempts, event, *, new=False):
             current.update(question_policy=value['question_policy'], question_budget=dict(
                 limit=QUESTION_LIMIT, asked=0, remaining=QUESTION_LIMIT, current_question=None, limit_reached=False))
         if 'selection_policy' in value: current['selection_policy'] = value['selection_policy']
+        if 'competence_prerequisites' in value:current['competence_prerequisites']=deepcopy(value['competence_prerequisites'])
         attempts.append(current)
     else:
         if current is None: raise ValueError('Accept a diagnostic first')
@@ -242,6 +257,7 @@ def apply(attempts, event, *, new=False):
             elif action == 'complete':
                 current['status'] = 'completed'
             elif action == 'prompt':
+                if current.get('selection_policy')=='adaptive_v2' and 'rubric' not in value:raise ValueError('adaptive_v2 requires a saved rubric')
                 if new: check_selection(current, value['competence'], value['prompt'])
                 budget = current.get('question_budget')
                 if budget and budget['limit_reached']:raise ValueError('Diagnostic question limit reached')
@@ -265,6 +281,9 @@ def apply(attempts, event, *, new=False):
                     raise ValueError('Structured assessment requires a rubric saved before the answer')
                 if 'assessment' in value:
                     validate_assessment(value['assessment'], value['evidence'], prompt['rubric'])
+                if current.get('selection_policy')=='adaptive_v2':
+                    from diagnostic_policy import check_answer
+                    check_answer(current,prompt,value)
                 if ('next_competence' in value and value['next_competence'] is not None
                         and value['next_competence'] not in current['competences']):
                     raise ValueError('Unknown next diagnostic competence')
@@ -471,6 +490,12 @@ def diagnostic(args):
     incoming = getattr(args, 'update_file', None)
     if incoming:
         value=read_json(incoming)
+        if isinstance(value,dict) and value.get('action')=='accept' and value.get('selection_policy')=='adaptive_v2':
+            guidance=starting_guidance(args)
+            if not guidance['valid']:raise ValueError('Cannot choose initial difficulty: '+guidance['reason'])
+            if (guidance['difficulty'] is not None and 'next_difficulty' in value
+                    and value['next_difficulty']!=guidance['difficulty'] and 'starting_reason' not in value):
+                raise ValueError('Initial difficulty differs from self-assessment; provide a starting calibration reason')
         if isinstance(value,dict) and value.get('action')=='accept' and 'next_difficulty' not in value:
             guidance=starting_guidance(args)
             if not guidance['valid']:raise ValueError('Cannot choose initial difficulty: '+guidance['reason'])
