@@ -108,7 +108,9 @@ class WindowsOnboarding(unittest.TestCase):
             self.assertEqual(len(state['onboarding_answers']),number)
         self.assertEqual(state['onboarding'],'complete');self.assertIsNone(state['onboarding_next'])
         self.assertEqual(self.cli('diagnostic')['status'],'not_started')
-        self.assertEqual(state['effective'],__import__('learning_tools').DEFAULTS)
+        self.assertEqual(state['effective'],dict(__import__('learning_tools').DEFAULTS,checks=ANSWERS['check_frequency']))
+        self.assertEqual(state['checks_source'],'onboarding')
+        self.assertEqual(state['layers']['profile']['values'],{})
 
     def test_skip_pause_new_chat_and_edit_do_not_repeat_questions(self):
         self.answer('outcome',['course']);self.cli('settings','--onboarding-skip','subject')

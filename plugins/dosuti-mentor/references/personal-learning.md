@@ -35,11 +35,19 @@ onboarding_answers и onboarding_next; любой вопрос и весь оп�
 - style: teacher (преподаватель), partner (напарник), reviewer (строгая проверка без унижения).
 - format: steps (короткие шаги), blocks (крупные блоки), file (учебный материал файлом с дальнейшим обсуждением).
 - level: beginner / intermediate / advanced; detail: concise / balanced / detailed.
-- checks: each_block / end / on_request.
+- checks: adaptive (умолчание) / each_block / end / on_request.
 
 Постоянные параметры подачи сохраняй через settings --set; ответы восьми вопросов
 храни отдельно от values в том же preferences.json через --onboarding-file.
-Это не меняет настройки автоматически. complete наступает после решения всех
+Values не перезаписываются автоматически. Только effective.checks вычисляется
+с приоритетом course.values → profile.values → однозначный answered check_frequency
+из знакомства → adaptive. Checks_source показывает источник, checks_unresolved —
+необходимость смысловой интерпретации. Одно значение в списке допустимо; смешанный,
+свободный, scheduled или clarifying не переводится программно в фиксированный режим.
+Сохранённое старое values.checks=each_block считается явным выбором: происхождение
+старой записи неизвестно, не заменяй его молча. Чтение не мигрирует preferences.
+Подробные [правила подачи](lesson-presentation.md) различают настройки и временную
+просьбу о темпе. complete наступает после решения всех
 восьми вопросов, skipped — при явном пропуске всего знакомства; отказ от одного
 вопроса сохраняй через --onboarding-skip. Skipped не означает отказ от обучения. Позднее пользователь может изменить выбор
 обычной фразой; сохранение постоянного предпочтения отличай от просьбы «сейчас
