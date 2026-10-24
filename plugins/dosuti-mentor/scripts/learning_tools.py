@@ -28,15 +28,13 @@ def onboarding_answers(value):
     for question, record in value.items():
         if not isinstance(record,dict):raise ValueError('Invalid onboarding answer record')
         if record == dict(status='skipped'):continue
-        if (not {'status','value'}<=set(record) or set(record)-{'status','value','text','area','direction'}
+        if (not {'status','value'}<=set(record) or set(record)-{'status','value','text','area','direction','focus'}
                 or record['status'] not in ('answered','clarifying')
-                or (question!='subject' and set(record)&{'area','direction'})):
+                or (question!='subject' and set(record)&{'area','direction','focus'})):
             raise ValueError('Invalid onboarding answer record')
-        for field in ('text','area','direction'):
+        for field in ('text','area','direction','focus'):
             if field in record and (not isinstance(record[field],str) or not record[field].strip() or len(record[field])>4000):
                 raise ValueError('Invalid onboarding '+field)
-        if record['status']=='clarifying' and 'direction' in record:
-            raise ValueError('A known direction does not need subject clarification')
         answer=record['value']; choices=ONBOARDING_QUESTIONS[question]
         if answer is None:
             if 'text' not in record:raise ValueError('Free onboarding answer requires actual text')
@@ -67,8 +65,8 @@ def onboarding_answers(value):
 
 
 def onboarding_record(answer):
-    if isinstance(answer,dict) and set(answer)&{'value','text','area','direction','pending'}:
-        if set(answer)-{'value','text','area','direction','pending'} or type(answer.get('pending',False)) is not bool:
+    if isinstance(answer,dict) and set(answer)&{'value','text','area','direction','focus','pending'}:
+        if set(answer)-{'value','text','area','direction','focus','pending'} or type(answer.get('pending',False)) is not bool:
             raise ValueError('Invalid onboarding answer fields')
         return dict(status='clarifying' if answer.get('pending') else 'answered',
                     value=answer.get('value'),**{k:v for k,v in answer.items() if k not in ('value','pending')})
@@ -86,10 +84,12 @@ def onboarding_message(onboarding, answers, next_question):
     record=answers.get(next_question,{})
     if record.get('status')=='clarifying':
         area=record.get('area',record.get('value'))
-        clarify='### Уточнение: '+(area if isinstance(area,str) else 'Другая область')
-        if clarify+'\n' not in copy:clarify='### Уточнение: Другая область'
+        prefix='### Профиль: ' if record.get('direction') else '### Уточнение: '
+        clarify=prefix+(area if isinstance(area,str) else 'Другая область')
+        if clarify+'\n' not in copy:clarify=prefix+'Другая область'
         message=heading+'\n\n'+(block(clarify) if next_question=='subject' else
             'Расскажи свой вариант своими словами. Можно также написать «Пропустить».')
+        if next_question=='subject' and record.get('direction'):message=heading+'\n\nНаправление: '+record['direction']+'.\n\n'+block(clarify)
     if onboarding=='not_asked' and not answers:
         message=block('## Приветствие')+'\n\n'+message
     return message
@@ -224,6 +224,10 @@ def settings(args):
             if previous.get('status')=='clarifying' and incoming.get('status') in ('answered','clarifying'):
                 incoming=dict(incoming)
                 if 'area' in previous:incoming.setdefault('area',previous['area'])
+                same_area=incoming.get('area')==previous.get('area')
+                if same_area and 'direction' in previous:incoming.setdefault('direction',previous['direction'])
+                if same_area and incoming.get('direction')==previous.get('direction') and 'focus' in previous:
+                    incoming.setdefault('focus',previous['focus'])
                 if previous.get('text'):
                     incoming.setdefault('text',previous['text'])
                     if incoming['text']!=previous['text'] and not incoming['text'].startswith(previous['text']+'\n'):

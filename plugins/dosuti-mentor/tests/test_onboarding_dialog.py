@@ -65,7 +65,8 @@ class OnboardingDialog(unittest.TestCase):
         state = self.save({'subject': dict(value='Программирование и разработка.',
             text='1', area='Программирование и разработка.', pending=True)})
         self.assertEqual(state['onboarding_next'], 'subject')
-        self.assertIn('Java', state['onboarding_message']); self.assertIn('Вопрос 2 из 8', state['onboarding_message'])
+        self.assertIn('Backend', state['onboarding_message']); self.assertNotIn('Java', state['onboarding_message'])
+        self.assertIn('Вопрос 2 из 8', state['onboarding_message'])
         path = lt.pref_file(self.f.a, 'profile'); before = path.read_bytes()
         result = subprocess.run([sys.executable, '-B', str(PLUGIN/'scripts/course.py'), 'settings',
             '--course', str(self.f.a.course), '--profile', self.f.a.profile],
