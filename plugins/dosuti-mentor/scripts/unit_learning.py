@@ -4,7 +4,7 @@ from pathlib import Path
 from atomic_files import atomic_json
 from profile_storage import checked
 from storage_lock import file_lock
-from read_snapshot import cached
+from read_snapshot import cached, reuse_reads
 
 LEGACY_SCHEMA='unit_learning_v1'
 SCHEMA='unit_learning_v2'
@@ -213,7 +213,7 @@ def validate(value,kind):
 
 
 @cached
-def load(path,unit_id=None,compact=False,history_limit=0):
+def _load(path,unit_id=None,compact=False,history_limit=0):
     import course
     from learning_tools import read_json
     from source_integrity import digest
@@ -226,7 +226,7 @@ def load(path,unit_id=None,compact=False,history_limit=0):
     from collections import deque
     if type(history_limit) is not int or not 0<=history_limit<=100:raise ValueError('history-limit must be 0..100')
     retained=[];latest={};baselines={};count=0;counts={};history=deque(maxlen=history_limit)
-    successful=deque(maxlen=history_limit);successful_count=0;lessons={};tasks={}
+    successful=deque(maxlen=history_limit);successful_count=0;lessons={};tasks={};unit_counts={};unit_history={}
     for i,event in enumerate(events,1):
         if (not isinstance(event,dict) or set(event)!={'revision','at','unit','unit_sha256','session','type','value'}
                 or type(event['revision']) is not int or event['revision']!=i):raise ValueError('Invalid unit learning history')
@@ -246,6 +246,11 @@ def load(path,unit_id=None,compact=False,history_limit=0):
         count=i
         if event['type']=='assessment':
             for criterion in event['value']['criteria']:baselines[(event['unit'],event['unit_sha256'],criterion)]=event
+        if compact:
+            unit_history.setdefault(event['unit'],deque(maxlen=100)).append(event)
+            if event['type']=='assessment':
+                entry=unit_counts.setdefault(event['unit'],{}).setdefault(event['unit_sha256'],dict(attempts=0,explanations=0))
+                entry['explanations' if event['value']['stage']=='explained' else 'attempts']+=1
         if unit_id is not None and event['unit']!=unit_id:continue
         if compact:history.append(event)
         if compact and unit_id is None and event['type']=='assessment' and event['value']['stage'] in ('solved_independently','checked_later'):
@@ -270,7 +275,27 @@ def load(path,unit_id=None,compact=False,history_limit=0):
     if compact and unit_id is not None:result.update(_counts=counts,_history=list(history))
     elif compact and history_limit:
         result.update(_history=list(history),_completed_tasks=list(successful),_completed_task_count=successful_count)
+    if compact:result.update(_unit_counts=unit_counts,_unit_history=unit_history)
     return result
+
+
+def load(path,unit_id=None,compact=False,history_limit=0):
+    if type(history_limit) is not int or not 0<=history_limit<=100:raise ValueError('history-limit must be 0..100')
+    if not compact:return _load(path,unit_id,compact,history_limit)
+    # One validated replay supplies all compact projections in this operation.
+    data=dict(_load(path,None,True,100))
+    counts=data.pop('_unit_counts');histories=data.pop('_unit_history')
+    if unit_id is not None:
+        data['events']=[e for e in data['events'] if e['unit']==unit_id]
+        data['_counts']=counts.get(unit_id,{})
+        data['_history']=list(histories.get(unit_id,()))[-history_limit:] if history_limit else []
+        data.pop('_completed_tasks',None);data.pop('_completed_task_count',None)
+    elif history_limit:
+        data['_history']=data['_history'][-history_limit:]
+        data['_completed_tasks']=data['_completed_tasks'][-history_limit:]
+    else:
+        for key in ('_history','_completed_tasks','_completed_task_count'):data.pop(key,None)
+    return data
 
 
 def view(args,unit,data,*,lesson_id=None):
@@ -336,6 +361,7 @@ def topic_summary(unit,learning):
                 verification='recorded_evidence_not_mastery_or_automatic_completion')
 
 
+@reuse_reads
 def learn_unit(args):
     import course
     import study_units
@@ -441,6 +467,9 @@ def learn_unit(args):
         learning['evidence_time_valid']=all(r['time_valid'] for r in learning['adaptive']['criteria'])
         learning['assessment_and_time_verified']=learning['all_criteria_demonstrated'] and learning['evidence_time_valid']
         learning['topic_summary']=topic_summary(unit,learning)
+        if getattr(args,'compact',False):
+            needed={row['evidence_revision'] for row in learning['adaptive']['criteria'] if row['evidence_revision'] is not None}
+            learning['criterion_evidence']=[event for event in journal['events'] if event['revision'] in needed]
     except LessonSelectionError:raise
     except (ValueError,OSError) as error:
         learning=dict(valid=False,revision=None,reason=str(error),recovery='Preserve and repair unit-learning.json before writing')

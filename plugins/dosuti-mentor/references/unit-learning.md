@@ -1,13 +1,17 @@
 # Обучение по общей теме — 0.4.12
 
+В обычных CLI-вызовах используй `--compact`; подробности и ревизии доказательств —
+по [контракту краткой выдачи](cli-output.md).
+
+
 Один интерфейс работает с видео- и текстовыми unit. Сначала создаётся карточка
 unit с проверенными источниками (study-units.md). Для существующей lesson без unit
 остаются прежние teach-lecture, progress и resume; автоматической миграции нет.
 
 ```sh
-PYTHON PLUGIN_ROOT/scripts/course.py learn-unit --course COURSE --profile USER --unit-id UNIT --session CHAT_ID
-PYTHON PLUGIN_ROOT/scripts/course.py learn-unit --course COURSE --profile USER --unit-id UNIT --session CHAT_ID --event-file EVENT_JSON --expected-revision N --expected-unit-sha256 SHA
-PYTHON PLUGIN_ROOT/scripts/course.py learn-unit --course COURSE --profile USER --unit-id UNIT --session CHAT_ID --checkpoint-file CHECKPOINT_JSON --expected-revision N --expected-unit-sha256 SHA
+PYTHON PLUGIN_ROOT/scripts/course.py learn-unit --course COURSE --profile USER --unit-id UNIT --session CHAT_ID --compact
+PYTHON PLUGIN_ROOT/scripts/course.py learn-unit --course COURSE --profile USER --unit-id UNIT --session CHAT_ID --event-file EVENT_JSON --expected-revision N --expected-unit-sha256 SHA --compact
+PYTHON PLUGIN_ROOT/scripts/course.py learn-unit --course COURSE --profile USER --unit-id UNIT --session CHAT_ID --checkpoint-file CHECKPOINT_JSON --expected-revision N --expected-unit-sha256 SHA --compact
 ```
 
 N — learning.revision, SHA — unit.content_sha256 из реально просмотренного
@@ -124,7 +128,7 @@ question/answer и непустые criteria. hints — число подска�
 преподаватель. Старые записи читаются по прежним правилам, их оценки и даты
 автоматически не пересматриваются.
 
-## Контекст отдельного занятия (разработка 0.6.0, этап 1)
+## Контекст отдельного занятия (0.7.0)
 
 Материал `unit.id`, чат `session` и отдельное занятие `lesson_context.value.id` —
 разные идентификаторы. Для нового занятия сначала прочитай learn-unit: источники,
@@ -142,9 +146,9 @@ criteria, learning_progress (включая диагностику), цель и
 занятия использует его ID и не создаёт новый контекст.
 
 ```sh
-PYTHON PLUGIN_ROOT/scripts/course.py learn-unit --course COURSE --profile USER --unit-id UNIT --session CHAT_ID --lesson-context-file CONTEXT_JSON --expected-revision N --expected-unit-sha256 SHA
-PYTHON PLUGIN_ROOT/scripts/course.py learn-unit --course COURSE --profile USER --unit-id UNIT --session NEW_CHAT_ID --lesson-id LESSON_ID
-PYTHON PLUGIN_ROOT/scripts/course.py learn-unit --course COURSE --profile USER --unit-id UNIT --session CHAT_ID --lesson-id LESSON_ID --checkpoint-file CHECKPOINT_JSON --expected-revision N --expected-unit-sha256 SHA
+PYTHON PLUGIN_ROOT/scripts/course.py learn-unit --course COURSE --profile USER --unit-id UNIT --session CHAT_ID --lesson-context-file CONTEXT_JSON --expected-revision N --expected-unit-sha256 SHA --compact
+PYTHON PLUGIN_ROOT/scripts/course.py learn-unit --course COURSE --profile USER --unit-id UNIT --session NEW_CHAT_ID --lesson-id LESSON_ID --compact
+PYTHON PLUGIN_ROOT/scripts/course.py learn-unit --course COURSE --profile USER --unit-id UNIT --session CHAT_ID --lesson-id LESSON_ID --checkpoint-file CHECKPOINT_JSON --expected-revision N --expected-unit-sha256 SHA --compact
 ```
 
 Создание возвращает `learning.lesson_context.event`: UUID-based ID генерируется
@@ -167,7 +171,7 @@ learning_progress. Сам контекст не принимает и не ме�
 Плагин 0.5.0 не умеет читать новые типы событий: откат на него после записи
 контекстов требует сохранённой копии данных, а не удаления неизвестных событий.
 Кроме того, 0.5.0 отвергает явно сохранённое preferences.values.checks=adaptive.
-До первого использования 0.6.0 нужна согласованная копия курса, профилей и всех
+До первого использования 0.7.0 нужна согласованная копия курса, профилей и всех
 сегментов журнала при остановленной записи. Подробности —
 [совместимость и откат](../../../README.md#совместимость-и-безопасный-откат).
 
@@ -176,7 +180,7 @@ learning_progress. Сам контекст не принимает и не ме�
 относятся к unit; завершение отдельного занятия не завершает критерии unit.
 
 
-## Жизненный цикл занятия (разработка 0.6.0, этап 2)
+## Жизненный цикл занятия (0.7.0)
 
 Состояние выводится из того же журнала: контекст этапа 1 начинает `active`,
 `pause` переводит active → paused, `resume` — paused → active, `complete` —
@@ -185,7 +189,7 @@ active/paused → completed. Completed — терминальное состоя
 урока не присваиваются и миграция при чтении не выполняется.
 
 ```sh
-PYTHON PLUGIN_ROOT/scripts/course.py learn-unit --course COURSE --profile USER --unit-id UNIT --session CHAT_ID --lesson-id LESSON_ID --lesson-state-file STATE_JSON --expected-revision N --expected-unit-sha256 SHA
+PYTHON PLUGIN_ROOT/scripts/course.py learn-unit --course COURSE --profile USER --unit-id UNIT --session CHAT_ID --lesson-id LESSON_ID --lesson-state-file STATE_JSON --expected-revision N --expected-unit-sha256 SHA --compact
 ```
 
 Пауза и завершение содержат фактический checkpoint и сохраняются одной атомарной

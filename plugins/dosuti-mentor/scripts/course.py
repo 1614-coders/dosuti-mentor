@@ -4,6 +4,7 @@ import difflib
 from datetime import datetime, timezone
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
 import shutil
@@ -19,8 +20,10 @@ from preparation_status import tracked, phase
 from preparation_control import run as preparation_run
 from storage_paths import source_kind, local_path, anchored, resolved
 from source_integrity import (digest, source_matches, verify_evidence, check_local_video,
-                              seal_snapshot, verify_snapshot)
+                              seal_snapshot, verify_snapshot, verification_session)
+from video_sources import verification_paths as video_verification_paths
 from read_snapshot import observed, watch
+from cli_output import emit
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 
@@ -233,7 +236,7 @@ def context(args):
         (selected['learning_checkpoint'].get('state') or {}).get('lesson') == args.lesson)
     selected['learner_progress'] = visible_progress(
         [row for row in read_progress(args)['progress'] if row['lesson']==args.lesson],{args.lesson:data})
-    print(json.dumps(selected, ensure_ascii=False, indent=2))
+    emit(args,selected)
 
 
 def frame(args):
@@ -450,7 +453,10 @@ def download_video(directory, data, fragments=4, site_timeout=1800, quality='bes
     return acquire(directory, data['video'], fragments, site_timeout, quality)
 
 
+@verification_session(paths=lambda directory, data, *args, **kwargs: video_verification_paths(directory, data['video']),
+                      rehash=os.name == 'nt')
 def checked_video(directory, data, fragments=4, site_timeout=1800, quality='best', offline=False):
+    from source_integrity import file_hash, include_verification_path
     from compact_lesson import require_media_open
     require_media_open(directory)
     if offline and source_kind(data['video']['source'])=='remote':
@@ -459,6 +465,7 @@ def checked_video(directory, data, fragments=4, site_timeout=1800, quality='best
         if video is None: raise ValueError('Offline video cache is unavailable; retry online or provide a local file')
     else:
         video = download_video(directory, data, fragments, site_timeout, quality)
+    include_verification_path(video)
     checksum = file_hash(video)
     expected = data['video'].get('sha256')
     if expected and checksum != digest(expected, 'Registered video SHA256'):
@@ -472,6 +479,8 @@ def checked_video(directory, data, fragments=4, site_timeout=1800, quality='best
         latest['video'].update(status='available', path=str(video), sha256=checksum,
                                revision='sha256:' + checksum)
     update_lesson(directory, publish)
+    if file_hash(video) != checksum:
+        raise ValueError('Video changed during verification; register it as a new lesson')
     return video, checksum
 
 
@@ -662,8 +671,7 @@ def progress(args):
             if revision is not None and homework_integrity(homework) != 'verified':
                 raise ValueError('Homework changed during assessment; no result saved')
     from learning_intent import view as intent_view
-    print(json.dumps(dict(saved=True,profile=args.profile,
-                          learning_progress=intent_view(args)['learning_progress']),ensure_ascii=False,indent=2))
+    emit(args,dict(saved=True,profile=args.profile,learning_progress=intent_view(args)['learning_progress']))
 
 
 def diff_code(args):
@@ -768,6 +776,11 @@ def main():
     for name in ['init', 'add-lesson', 'attach', 'prepare', 'progress', 'bind', 'status', 'context', 'frame', 'scan-screen', 'diff-code', 'history', 'make-portable', 'settings', 'resume', 'topic', 'search', 'project-map', 'resource', 'code-stage', 'term-note', 'storage-report', 'download-plan', 'doctor', 'cleanup-plan', 'cleanup-progress', 'cleanup-job', 'fragments', 'intent', 'diagnostic', 'unit', 'learn-unit', 'research', 'project-timeline', 'study-next', 'career', 'career-route', 'ocr-frame', 'compact', 'spoken-homework', 'preparation-status', 'preparation-step', 'preparation-cancel', 'preparation-summary', 'material-status']:
         command = commands.add_parser(name)
         command.add_argument('--course', type=Path, required=True)
+        from cli_output import COMMANDS
+        if name in COMMANDS:command.add_argument('--compact',action='store_true',help='Current teaching state; full output remains the default')
+        if name in ('diagnostic','learn-unit'):
+            command.add_argument('--event-revision',type=int,action='append',help='Read validated evidence by revision (repeatable)')
+            command.add_argument('--history-before',type=int,help='Read an older history page; exclusive revision bound')
         if name in ['status', 'progress', 'bind', 'context', 'history', 'settings', 'resume', 'intent', 'diagnostic', 'learn-unit', 'study-next', 'career-route', 'cleanup-progress']:
             command.add_argument('--profile', default='default')
         if name in ['status','context','resume','intent','diagnostic','learn-unit','study-next','career-route']:
@@ -954,6 +967,8 @@ def main():
             command.add_argument('--previous', required=True)
             command.add_argument('--file')
     args = parser.parse_args()
+    from cli_output import validate_options
+    validate_options(args,parser)
     try:
         if args.command in ('preparation-status', 'preparation-cancel', 'material-status'):
             # Observe a live preparation operation without taking its exclusive use lock
@@ -994,10 +1009,10 @@ def main():
                 print(json.dumps(career(args),ensure_ascii=False,indent=2))
             elif args.command=='study-next':
                 from adaptive_learning import study_next
-                print(json.dumps(study_next(args),ensure_ascii=False,indent=2))
+                emit(args,study_next(args))
             elif args.command=='learn-unit':
                 from unit_learning import learn_unit
-                print(json.dumps(learn_unit(args),ensure_ascii=False,indent=2))
+                emit(args,learn_unit(args))
             elif args.command=='unit':
                 from study_units import unit
                 print(json.dumps(unit(args),ensure_ascii=False,indent=2))
@@ -1009,10 +1024,10 @@ def main():
                 print(json.dumps(research(args),ensure_ascii=False,indent=2))
             elif args.command=='diagnostic':
                 from diagnostic_learning import diagnostic
-                print(json.dumps(diagnostic(args),ensure_ascii=False,indent=2))
+                emit(args,diagnostic(args))
             elif args.command=='intent':
                 from learning_intent import intent
-                print(json.dumps(intent(args),ensure_ascii=False,indent=2))
+                emit(args,intent(args))
             elif args.command=='cleanup-progress':
                 from progress_cleanup import cleanup
                 print(json.dumps(cleanup(args),ensure_ascii=False,indent=2))
@@ -1039,7 +1054,7 @@ def main():
                 print(json.dumps(resource(args),ensure_ascii=False,indent=2))
             elif args.command in ('settings','resume','topic','search','project-map'):
                 import learning_tools
-                print(json.dumps(getattr(learning_tools,args.command.replace('-','_'))(args),ensure_ascii=False,indent=2))
+                emit(args,getattr(learning_tools,args.command.replace('-','_'))(args))
             else:
                 globals()[args.command.replace('-', '_')](args)
     except KeyboardInterrupt as error:

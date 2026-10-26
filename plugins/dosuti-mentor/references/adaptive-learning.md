@@ -1,5 +1,9 @@
 # Адаптация и повторение — 0.4.19
 
+В обычных CLI-вызовах используй `--compact`; подробности и ревизии доказательств —
+по [контракту краткой выдачи](cli-output.md).
+
+
 Результаты остаются в learners/PROFILE/unit-learning.json. Новый формат
 unit_learning_v2 читается вместе со старым v1. Чтение v1 не меняет байты; первая
 явная запись публикует v2, сохраняя все прежние события/ревизии. Старый плагин v1
@@ -7,8 +11,8 @@ unit_learning_v2 читается вместе со старым v1. Чтени�
 Неизвестная/повреждённая схема сохраняется, записи блокируются.
 
 ```sh
-PYTHON PLUGIN_ROOT/scripts/course.py study-next --course COURSE --profile USER --session CHAT_ID --limit 5
-PYTHON PLUGIN_ROOT/scripts/course.py learn-unit --course COURSE --profile USER --session CHAT_ID --unit-id UNIT
+PYTHON PLUGIN_ROOT/scripts/course.py study-next --course COURSE --profile USER --session CHAT_ID --limit 5 --compact
+PYTHON PLUGIN_ROOT/scripts/course.py learn-unit --course COURSE --profile USER --session CHAT_ID --unit-id UNIT --compact
 ```
 
 study-next — чтение без записи, не автоматическая смена маршрута. Возвращает
@@ -89,7 +93,7 @@ all_criteria_demonstrated принимает обе успешные стади�
 ## Выбор пользователя
 
 ```sh
-PYTHON PLUGIN_ROOT/scripts/course.py learn-unit --course COURSE --profile USER --session CHAT_ID --unit-id UNIT --review-file DECISION_JSON --expected-revision N --expected-unit-sha256 SHA
+PYTHON PLUGIN_ROOT/scripts/course.py learn-unit --course COURSE --profile USER --session CHAT_ID --unit-id UNIT --review-file DECISION_JSON --expected-revision N --expected-unit-sha256 SHA --compact
 ```
 
 ```json
@@ -122,7 +126,7 @@ SQLite остаётся отдельной системой. С0.4.20 больш
 сделать паузу или отказаться». Задавай по одному вопросу. Пропуски входят в 15.
 
 ```sh
-PYTHON PLUGIN_ROOT/scripts/course.py diagnostic --course COURSE --profile USER --session CHAT_ID
+PYTHON PLUGIN_ROOT/scripts/course.py diagnostic --course COURSE --profile USER --session CHAT_ID --compact
 PYTHON PLUGIN_ROOT/scripts/course.py diagnostic --course COURSE --profile USER --session CHAT_ID --update-file EVENT_JSON --expected-revision N --reason 'Фактический выбор или ответ пользователя' --history-limit 10
 ```
 

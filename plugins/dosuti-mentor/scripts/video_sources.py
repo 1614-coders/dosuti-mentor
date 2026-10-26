@@ -38,6 +38,17 @@ def check_hash(path, expected):
     return checksum
 
 
+def verification_paths(directory, video):
+    # Windows callers require a final full rehash, not just these identities.
+    paths = [p.resolve() for p in (Path(directory) / 'video').glob('*') if p.is_file()]
+    if source_kind(video['source']) == 'local':
+        paths.append(local_path(video['source']))
+    if video.get('path'):
+        paths.append(local_path(video['path']))
+    # New downloads/staging paths are deliberately outside this read-only cache.
+    return paths
+
+
 def cached(assets, video):
     # New cache receipt is tied to exact original URL, not an expiring CDN URL.
     marker = assets / 'download.json'
@@ -55,9 +66,11 @@ def cached(assets, video):
                 if video.get('sha256') == digest(receipt.get('sha256')):
                     return None  # Re-fetch only the already pinned content.
         path = safe_asset(assets, receipt.get('file'))
-        if path.stat().st_size != receipt.get('size') or file_hash(path) != digest(receipt.get('sha256')):
+        checksum = file_hash(path)
+        if path.stat().st_size != receipt.get('size') or checksum != digest(receipt.get('sha256')):
             raise ValueError('Video cache integrity changed; restore a trusted copy or register a new lesson')
-        check_hash(path, video.get('sha256'))
+        if video.get('sha256') and checksum != digest(video['sha256'], 'Registered video SHA256'):
+            raise ValueError('Video changed since registration; register it as a new lesson')
         return path
     # Adopt v0.1.4 caches only when the lesson already pinned their content.
     if video.get('sha256'):
