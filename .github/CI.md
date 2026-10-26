@@ -3,7 +3,7 @@
 `Tests` запускается при push в `develop` и при pull request в `develop` или `main`.
 
 - Linux, Python 3.12: весь существующий набор `unittest discover`.
-- Windows, Python 3.12 и PowerShell: `test_windows_runtime`,
+- Windows, Python 3.12, PowerShell 7 и Windows PowerShell 5.1: `test_windows_runtime`,
   `test_windows_onboarding`, `test_platform_diagnostics`. Это проверка поддерживаемых
   платформенных сценариев, а не весь набор и не живой диалог Codex.
 - Зависимости устанавливаются из существующего `scripts/requirements.txt`.

@@ -27,6 +27,10 @@ class WindowsRuntime(unittest.TestCase):
         def literal(value): return "'" + str(value).replace("'", "''") + "'"
         code = ("$ErrorActionPreference='Stop'; . " + literal(PACKAGE / 'Windows-Runtime.ps1') +
                 '; $homePath=' + literal(self.home) + '; ' + body + '; exit 0')
+        if os.name != 'nt':
+            # Only the executable lookup is replaced; run the real extraction.
+            code = code.replace('; $homePath=',
+                '; function Get-DoSutiTar { (Get-Command tar -CommandType Application).Source }; $homePath=', 1)
         encoded = base64.b64encode(code.encode('utf-16-le')).decode()
         result = subprocess.run([PWSH, '-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', encoded],
                                 capture_output=True, text=True, timeout=40)
@@ -118,13 +122,49 @@ $spec=[pscustomobject]@{sha256='ARCHIVE_SHA';python_exe_sha256='EXE_SHA'}
 $cache=Join-Path $homePath 'cache/python'; [IO.Directory]::CreateDirectory($cache) | Out-Null
 Copy-Item -LiteralPath 'ARCHIVE_PATH' -Destination (Join-Path $cache ($spec.sha256+'.tar.gz'))
 function Invoke-WebRequest {throw 'cached archive must not download'}
-function tar.exe { & tar @args }
+function tar.exe { throw 'PATH tar must not be used' }
 function Test-DoSutiPython {param($Executable,$LauncherArgs) [pscustomobject]@{executable=$Executable;version='3.12.15'} }
 $r=Install-DoSutiPython $homePath $spec
 if(-not (Test-Path -LiteralPath $r.executable)) {throw 'missing interpreter'}
 $again=Resolve-DoSutiPython $homePath '' $spec
 if(-not $again.owned -or $again.executable -ne $r.executable) {throw 'private reuse failed'}
 """.replace('ARCHIVE_SHA', sha).replace('EXE_SHA', exe_sha).replace('ARCHIVE_PATH', str(archive)))
+
+    def test_extraction_failure_cleans_staging_and_preserves_cached_archive(self):
+        archive = self.base / 'invalid.tar.gz'
+        archive.write_bytes(b'verified bytes but not a tar archive')
+        sha = hashlib.sha256(archive.read_bytes()).hexdigest()
+        self.run_ps("""
+Initialize-DoSutiHome $homePath | Out-Null
+$spec=[pscustomobject]@{sha256='ARCHIVE_SHA';python_exe_sha256=('0'*64)}
+$cache=Join-Path $homePath 'cache/python'; [IO.Directory]::CreateDirectory($cache) | Out-Null
+$archive=Join-Path $cache ($spec.sha256+'.tar.gz')
+Copy-Item -LiteralPath 'ARCHIVE_PATH' -Destination $archive
+function Invoke-WebRequest {throw 'offline cache must not download'}
+try { Install-DoSutiPython $homePath $spec; throw 'unexpected success' }
+catch { if($_.Exception.Message -notmatch 'Cannot extract Python') {throw} }
+if(@(Get-ChildItem -LiteralPath (Join-Path $homePath 'runtime') -Force).Count) {throw 'failed extraction left payload'}
+if((Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash -ne $spec.sha256) {throw 'cached archive changed'}
+""".replace('ARCHIVE_SHA', sha).replace('ARCHIVE_PATH', str(archive)))
+
+    def test_executable_checksum_failure_cleans_extraction(self):
+        archive = self.base / 'python.tar.gz'
+        payload = b'incorrect executable'
+        with tarfile.open(archive, 'w:gz') as tar:
+            item = tarfile.TarInfo('python/python.exe'); item.size = len(payload)
+            tar.addfile(item, io.BytesIO(payload))
+        sha = hashlib.sha256(archive.read_bytes()).hexdigest()
+        self.run_ps("""
+Initialize-DoSutiHome $homePath | Out-Null
+$spec=[pscustomobject]@{sha256='ARCHIVE_SHA';python_exe_sha256=('0'*64)}
+$cache=Join-Path $homePath 'cache/python'; [IO.Directory]::CreateDirectory($cache) | Out-Null
+Copy-Item -LiteralPath 'ARCHIVE_PATH' -Destination (Join-Path $cache ($spec.sha256+'.tar.gz'))
+function Invoke-WebRequest {throw 'offline cache must not download'}
+function Test-DoSutiPython {throw 'unverified executable was launched'}
+try { Install-DoSutiPython $homePath $spec; throw 'unexpected success' }
+catch { if($_.Exception.Message -notmatch 'executable SHA256 mismatch') {throw} }
+if(@(Get-ChildItem -LiteralPath (Join-Path $homePath 'runtime') -Force).Count) {throw 'checksum failure left payload'}
+""".replace('ARCHIVE_SHA', sha).replace('ARCHIVE_PATH', str(archive)))
 
     def test_unverified_private_executable_is_not_launched(self):
         self.run_ps("""

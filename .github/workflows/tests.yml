@@ -62,3 +62,8 @@ jobs:
         run: |
           Get-Command tar, tar.exe | Format-Table CommandType, Name, Source
           python -B -m unittest -v test_windows_runtime test_windows_onboarding test_platform_diagnostics
+      - name: Run Windows PowerShell 5.1 checks
+        working-directory: plugins/dosuti-mentor/tests
+        env:
+          DOSUTI_TEST_PWSH: C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe
+        run: python -B -m unittest -v test_windows_runtime test_windows_onboarding test_platform_diagnostics

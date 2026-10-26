@@ -86,6 +86,11 @@ print(json.dumps(dict(executable=sys.executable, version=platform.python_version
     finally { $process.Dispose() }
 }
 
+function Get-DoSutiTar {
+    # Do not select Git/MSYS tar or a PATH override on Windows.
+    return Join-Path ([Environment]::SystemDirectory) 'tar.exe'
+}
+
 function Install-DoSutiPython([string]$HomePath, $Spec) {
     $runtime = Join-Path $HomePath 'runtime'
     $target = Join-Path $runtime 'python'
@@ -116,9 +121,21 @@ function Install-DoSutiPython([string]$HomePath, $Spec) {
     $staging = Join-Path $runtime ('.python-staging-' + [guid]::NewGuid().ToString('N'))
     [IO.Directory]::CreateDirectory($staging) | Out-Null
     try {
-        # Only the pinned, verified provider archive reaches the system tar tool.
-        & tar.exe -xzf $archive -C $staging
-        if ($LASTEXITCODE -ne 0) { throw 'Cannot extract Python; Windows tar.exe is required.' }
+        # Windows bsdtar can lose non-ANSI characters in argv, even with PS 7.
+        # Unicode stays in CreateProcess's working directory; argv is relative ASCII.
+        $info = New-Object Diagnostics.ProcessStartInfo
+        $info.FileName = Get-DoSutiTar
+        $info.UseShellExecute = $false
+        $info.WorkingDirectory = $HomePath
+        $info.Arguments = '-xzf ' + (ConvertTo-DoSutiArgument ('cache/python/' + [IO.Path]::GetFileName($archive))) +
+            ' -C ' + (ConvertTo-DoSutiArgument ('runtime/' + [IO.Path]::GetFileName($staging)))
+        $process = New-Object Diagnostics.Process
+        $process.StartInfo = $info
+        try {
+            $process.Start() | Out-Null
+            $process.WaitForExit()
+            if ($process.ExitCode -ne 0) { throw 'Cannot extract Python; Windows tar.exe failed.' }
+        } finally { $process.Dispose() }
         $candidate = Join-Path $staging 'python/python.exe'
         if ((Get-FileHash -LiteralPath $candidate -Algorithm SHA256).Hash -ne $Spec.python_exe_sha256) { throw 'Python executable SHA256 mismatch.' }
         Move-Item -LiteralPath (Join-Path $staging 'python') -Destination $target
