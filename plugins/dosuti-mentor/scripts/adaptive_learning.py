@@ -204,9 +204,10 @@ def _study_next(args):
         result=recommendations(unit,selected_journal,now)
         if result['blocked']:blocked.append(dict(unit=unit['id'],reason='review_sources',details=unit['reasons']));continue
         view=unit_learning.view(args,unit,selected_journal)
-        if view['checkpoint']['valid']:continuations.append(dict(unit=unit['id'],checkpoint=view['checkpoint']))
+        if view['checkpoint']['valid'] and 'lesson_id' not in view['checkpoint']['event']['value']:continuations.append(dict(unit=unit['id'],checkpoint=view['checkpoint']))
         for action in result['next_actions']:
             suggestions.append(dict(unit=unit['id'],unit_sha256=unit['content_sha256'],prerequisites=unit['prerequisites'],**action))
+    continuations.extend(row for row in unit_learning.lesson_continuations(units,journal) if row.get('lesson_id') and row['valid'])
     suggestions.sort(key=lambda r:(r['priority'],r['unit'],r['criterion']))
     intent_view=intent(args)
     roadmap=roadmap_recommendations(intent_view,units,journal,now)

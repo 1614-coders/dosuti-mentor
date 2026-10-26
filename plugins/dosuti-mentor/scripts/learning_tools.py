@@ -6,10 +6,10 @@ import re
 from atomic_files import atomic_json
 from storage_lock import file_lock
 
-DEFAULTS = dict(style='teacher', format='steps', level='beginner', detail='balanced', checks='each_block')
+DEFAULTS = dict(style='teacher', format='steps', level='beginner', detail='balanced', checks='adaptive')
 CHOICES = dict(style=('teacher','partner','reviewer'), format=('steps','blocks','file'),
                level=('beginner','intermediate','advanced'), detail=('concise','balanced','detailed'),
-               checks=('each_block','end','on_request'))
+               checks=('adaptive','each_block','end','on_request'))
 ONBOARDING_STATES = ('not_asked','in_progress','complete','skipped')
 ONBOARDING_QUESTIONS = dict(
     outcome=('topics','skill','course','profession','growth','undecided'),
@@ -166,9 +166,17 @@ def preferences(args):
             comment = onboarding_comment(data.get('onboarding_comment',''))
             if onboarding not in ONBOARDING_STATES:
                 raise ValueError('Invalid onboarding state')
+    checks_source=next((scope for scope in ('course','profile') if 'checks' in layers[scope]['values']),'default')
+    record=answers.get('check_frequency',{});selected=record.get('value')
+    if isinstance(selected,list) and len(selected)==1:selected=selected[0]
+    checks_unresolved=False
+    if checks_source=='default' and record.get('status') in ('answered','clarifying'):
+        if record['status']=='answered' and isinstance(selected,str) and selected in CHOICES['checks']:
+            result['checks']=selected;checks_source='onboarding'
+        else:checks_unresolved=True
     pending = [q for q in ONBOARDING_QUESTIONS if answers.get(q,{}).get('status')=='clarifying'
                 or (onboarding not in ('complete','skipped') and q not in answers)]
-    return dict(effective=result,layers=layers,onboarding=onboarding,
+    return dict(effective=result,layers=layers,checks_source=checks_source,checks_unresolved=checks_unresolved,onboarding=onboarding,
                 onboarding_answers=answers,onboarding_comment=comment,
                 onboarding_pending=pending,onboarding_next=pending[0] if pending else None,
                 onboarding_message=onboarding_message(onboarding,answers,pending[0] if pending else None))

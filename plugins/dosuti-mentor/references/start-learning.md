@@ -1,5 +1,9 @@
 # Старт обучения и переходы между задачами
 
+В обычных CLI-вызовах используй `--compact`; подробности и ревизии доказательств —
+по [контракту краткой выдачи](cli-output.md).
+
+
 Начни с запроса человека. Для знакомства используй восемь вопросов в порядке
 ниже, по одному за раз; любой вопрос или весь опрос можно пропустить.
 Не задерживай конкретно запрошенную помощь ради знакомства.
@@ -211,8 +215,8 @@ text/area/direction/focus; pending — только флаг входного о
 не добавляй pending=true без причины.
 
 ```sh
-PRIVATE_PYTHON -B PLUGIN_ROOT/scripts/course.py settings --course COURSE --profile USER --onboarding-file ANSWERS_JSON
-PRIVATE_PYTHON -B PLUGIN_ROOT/scripts/course.py settings --course COURSE --profile USER --onboarding-skip self_assessment
+PRIVATE_PYTHON -B PLUGIN_ROOT/scripts/course.py settings --course COURSE --profile USER --onboarding-file ANSWERS_JSON --compact
+PRIVATE_PYTHON -B PLUGIN_ROOT/scripts/course.py settings --course COURSE --profile USER --onboarding-skip self_assessment --compact
 ```
 
 Все ключи обновления необязательны; передавай только фактические изменения.
@@ -349,10 +353,10 @@ competence_prerequisites к accept с fixed_15_v1. Старые adaptive_v1 не
 Не инициализируй существующий курс заново.
 
 ```sh
-PYTHON PLUGIN_ROOT/scripts/course.py intent --course COURSE --profile USER --session CHAT_ID
-PYTHON PLUGIN_ROOT/scripts/course.py settings --course COURSE --profile USER
-PYTHON PLUGIN_ROOT/scripts/course.py settings --course COURSE --profile USER --onboarding in_progress
-PYTHON PLUGIN_ROOT/scripts/course.py intent --course COURSE --profile USER --session CHAT_ID --update-file CHANGE_JSON --reason REASON --expected-revision REV
+PYTHON PLUGIN_ROOT/scripts/course.py intent --course COURSE --profile USER --session CHAT_ID --compact
+PYTHON PLUGIN_ROOT/scripts/course.py settings --course COURSE --profile USER --compact
+PYTHON PLUGIN_ROOT/scripts/course.py settings --course COURSE --profile USER --onboarding in_progress --compact
+PYTHON PLUGIN_ROOT/scripts/course.py intent --course COURSE --profile USER --session CHAT_ID --update-file CHANGE_JSON --reason REASON --expected-revision REV --compact
 ```
 
 CHANGE_JSON — реальный UTF-8 файл с изменением из learning-intent.md; записывай

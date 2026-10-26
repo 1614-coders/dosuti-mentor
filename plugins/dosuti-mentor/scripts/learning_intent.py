@@ -319,15 +319,7 @@ def learning_progress(args, intent):
                 criteria=event['value']['criteria'],stage=event['value']['stage'],
                 current=bool(unit and not unit['stale'] and unit['content_sha256']==event['unit_sha256'])))
         result['completed_unit_task_count']=journal['_completed_task_count']
-        latest={}
-        for event in journal['events']:
-            if event['type']=='checkpoint':latest[(event['unit'],event['session'])]=event
-        for (name,session),event in latest.items():
-            unit=units.get(name)
-            valid=bool(unit and not unit['stale'] and unit['content_sha256']==event['unit_sha256'])
-            result['continuations'].append(dict(kind='unit',unit=name,session=session,
-                revision=event['revision'],checkpoint=event['value'],valid=valid,
-                reason=None if valid else 'unit_or_sources_changed'))
+        result['continuations'].extend(unit_learning.lesson_continuations(units,journal))
     except (ValueError,OSError) as error:
         reason='unit learning: '+str(error)
         result.update(valid=False,reason='; '.join(filter(None,[result.get('reason'),reason])))

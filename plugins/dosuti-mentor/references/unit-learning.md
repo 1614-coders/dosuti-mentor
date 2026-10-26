@@ -1,13 +1,17 @@
 # Обучение по общей теме — 0.4.12
 
+В обычных CLI-вызовах используй `--compact`; подробности и ревизии доказательств —
+по [контракту краткой выдачи](cli-output.md).
+
+
 Один интерфейс работает с видео- и текстовыми unit. Сначала создаётся карточка
 unit с проверенными источниками (study-units.md). Для существующей lesson без unit
 остаются прежние teach-lecture, progress и resume; автоматической миграции нет.
 
 ```sh
-PYTHON PLUGIN_ROOT/scripts/course.py learn-unit --course COURSE --profile USER --unit-id UNIT --session CHAT_ID
-PYTHON PLUGIN_ROOT/scripts/course.py learn-unit --course COURSE --profile USER --unit-id UNIT --session CHAT_ID --event-file EVENT_JSON --expected-revision N --expected-unit-sha256 SHA
-PYTHON PLUGIN_ROOT/scripts/course.py learn-unit --course COURSE --profile USER --unit-id UNIT --session CHAT_ID --checkpoint-file CHECKPOINT_JSON --expected-revision N --expected-unit-sha256 SHA
+PYTHON PLUGIN_ROOT/scripts/course.py learn-unit --course COURSE --profile USER --unit-id UNIT --session CHAT_ID --compact
+PYTHON PLUGIN_ROOT/scripts/course.py learn-unit --course COURSE --profile USER --unit-id UNIT --session CHAT_ID --event-file EVENT_JSON --expected-revision N --expected-unit-sha256 SHA --compact
+PYTHON PLUGIN_ROOT/scripts/course.py learn-unit --course COURSE --profile USER --unit-id UNIT --session CHAT_ID --checkpoint-file CHECKPOINT_JSON --expected-revision N --expected-unit-sha256 SHA --compact
 ```
 
 N — learning.revision, SHA — unit.content_sha256 из реально просмотренного
@@ -123,3 +127,129 @@ question/answer и непустые criteria. hints — число подска�
 семантической новизны: переименование переменных/перефразирование проверяет
 преподаватель. Старые записи читаются по прежним правилам, их оценки и даты
 автоматически не пересматриваются.
+
+## Контекст отдельного занятия (0.7.0)
+
+Материал `unit.id`, чат `session` и отдельное занятие `lesson_context.value.id` —
+разные идентификаторы. Для нового занятия сначала прочитай learn-unit: источники,
+criteria, learning_progress (включая диагностику), цель и принятый Roadmap. По ним
+составь конкретные тему, цель и краткий план; разрешены темы вне маршрута.
+Смысловую уместность плана определяет наставник, а не проверка полей JSON.
+
+```json
+{"kind":"new_topic","topic":"Замена значения в Map","goal":"Объяснить поведение одинаковых ключей","plan":["Разобрать пример","Решить новую задачу"]}
+```
+
+Типы: `new_topic`, `continuation`, `review`, `practice`, `gap_work` — новая тема,
+продолжение темы, повторение, практика, работа над пробелами. `continuation` означает
+новое запланированное занятие по продолжающейся теме; восстановление прежнего
+занятия использует его ID и не создаёт новый контекст.
+
+```sh
+PYTHON PLUGIN_ROOT/scripts/course.py learn-unit --course COURSE --profile USER --unit-id UNIT --session CHAT_ID --lesson-context-file CONTEXT_JSON --expected-revision N --expected-unit-sha256 SHA --compact
+PYTHON PLUGIN_ROOT/scripts/course.py learn-unit --course COURSE --profile USER --unit-id UNIT --session NEW_CHAT_ID --lesson-id LESSON_ID --compact
+PYTHON PLUGIN_ROOT/scripts/course.py learn-unit --course COURSE --profile USER --unit-id UNIT --session CHAT_ID --lesson-id LESSON_ID --checkpoint-file CHECKPOINT_JSON --expected-revision N --expected-unit-sha256 SHA --compact
+```
+
+Создание возвращает `learning.lesson_context.event`: UUID-based ID генерируется
+программой; unit, версия материала, исходный чат и время находятся в заголовке
+события. `value.basis` сохраняет исходную учебную цель, ревизии intent/цели/принятого
+плана/диагностики/журнала результатов и состояния критериев этой unit. Это снимок
+оснований, а не новая оценка; актуальные знания по всем темам доступны в
+learning_progress. Сам контекст не принимает и не меняет Roadmap.
+
+Без `--lesson-id` чтение возвращает `lesson_context=null` и список `lesson_contexts`;
+программа не выбирает последнее занятие произвольно. Явный ID восстанавливается
+в другом чате и процессе; неизвестный или чужой для unit ID отклоняется.
+`lesson_checkpoint` возвращает последнюю точку выбранного занятия независимо от
+чата. Прежний `checkpoint` остаётся проекцией текущей session. Привязка checkpoint
+проверяется по ID и версии материала; точки разных занятий одного чата сохраняются.
+
+События `lesson_context` хранятся в том же журнале v2 и поддерживаются существующими
+сегментами v3. Старые v1/v2/v3 читаются без миграции при чтении, без вымышленных
+контекстов; штатная запись старого v1 использует существующий механизм v2.
+Плагин 0.5.0 не умеет читать новые типы событий: откат на него после записи
+контекстов требует сохранённой копии данных, а не удаления неизвестных событий.
+Кроме того, 0.5.0 отвергает явно сохранённое preferences.values.checks=adaptive.
+До первого использования 0.7.0 нужна согласованная копия курса, профилей и всех
+сегментов журнала при остановленной записи. Подробности —
+[совместимость и откат](../../../README.md#совместимость-и-безопасный-откат).
+
+Контекст и checkpoint не являются попыткой, объяснением или освоением. Изменение
+материала оставляет историю контекста, но помечает его valid=false. Жизненный цикл и переключение описаны ниже. Прежние assessment по-прежнему
+относятся к unit; завершение отдельного занятия не завершает критерии unit.
+
+
+## Жизненный цикл занятия (0.7.0)
+
+Состояние выводится из того же журнала: контекст этапа 1 начинает `active`,
+`pause` переводит active → paused, `resume` — paused → active, `complete` —
+active/paused → completed. Completed — терминальное состояние этого ID; для
+нового занятия создаётся новый контекст. Старым записям без контекста состояния
+урока не присваиваются и миграция при чтении не выполняется.
+
+```sh
+PYTHON PLUGIN_ROOT/scripts/course.py learn-unit --course COURSE --profile USER --unit-id UNIT --session CHAT_ID --lesson-id LESSON_ID --lesson-state-file STATE_JSON --expected-revision N --expected-unit-sha256 SHA --compact
+```
+
+Пауза и завершение содержат фактический checkpoint и сохраняются одной атомарной
+записью. Ответы/оценки не создаются. Например:
+
+```json
+{"action":"pause","checkpoint":{"recap":"Разобран пример","next_step":"Новая задача","pending_question":"Почему размер не изменился?"}}
+```
+
+`resume` содержит только action. `complete` имеет ту же форму с checkpoint,
+что и pause, и не означает освоения темы. Запись нового checkpoint или результата
+с явным ID завершённого занятия запрещена. Самостоятельная последующая работа по
+unit возможна через новое занятие или прежний интерфейс unit без ID урока.
+
+Смена темы — решение по конкретному намерению, а не автоматически принятый план:
+
+```json
+{"action":"request_switch","request_id":"switch-UUID","target_topic":"HTTP в Java"}
+```
+
+Сначала сохрани запрос, затем один раз уточни у ученика намерение сменить тему.
+Request ID генерирует вызывающая сторона один раз на фактическое намерение; не
+создавай новый ID при повторной обработке сообщения или чтении другого чата.
+Текст target_topic — выбранная тема, не доказательство готовности материала.
+`learning.lesson_state` возвращает status, revision, switch_request и
+confirmation_required. Запрос не меняет состояние урока и не является согласием.
+
+- Согласие: `confirm_switch` с тем же request_id и фактическим checkpoint.
+  Атомарно сохраняет checkpoint и paused прежнего занятия. После записи используй
+  target_topic для перехода к новому/существующему занятию через текущие средства
+  подготовки/teach-unit. Контекст новой темы не создаётся вымышленным по названию.
+- Отказ: `cancel_switch` с тем же request_id, без checkpoint; прежний урок active.
+- Повтор того же request/решения идемпотентен и не увеличивает ревизию.
+  Противоположное решение после разрешения, другая тема с тем же ID или второй
+  незакрытый запрос отклоняются. Для нового действительного намерения — новый ID.
+- Остановка «потом продолжим»: pause с checkpoint сразу, без запроса подтверждения.
+  Нерешённое намерение сохраняется, но в paused/completed confirmation_required=false.
+
+Разрешённое решение сохраняется в журнале и не запрашивается повторно. При
+незакрытом запросе продолжай ожидание прежнего ответа, не создавай новый вопрос.
+Программа контролирует идентичность запросов и переходы; она не проверяет, что
+модель действительно один раз сформулировала вопрос и получила человеческое согласие.
+
+`lesson_contexts[*].status` хранит проекцию состояний, `lesson_checkpoint` показывает
+последнюю сохранённую точку даже завершённого урока. Для pause/complete/confirm
+она является помеченной проекцией checkpoint из события lesson_state, а не вторым
+событием. Completed остаётся в истории, но исключается из текущего checkpoint,
+learning_progress.continuations/stopped_at и продолжений study-next.
+Active/paused доступны между чатами, включая контекст без checkpoint (его checkpoint
+равен null: фактическая точка остановки не выдумывается). Несколько занятий одной
+unit различаются lesson_id; несколько чатов одного занятия дают одно продолжение.
+Несколько незавершённых занятий требуют выбора, а не произвольного последнего ID.
+
+Формат новых lesson_state — расширение того же v2-журнала и его сегментов v3.
+Все переходы, ссылки, ревизии и идемпотентность проверяются под прежними блокировками
+и при полном replay. При конфликте перечитай состояние перед решением. Нет новой
+БД, изменения Roadmap, диагностики или алгоритма оценивания.
+
+## Практические задания и помощь
+
+Для новых unit-заданий используй `--practice-file` и привязку assessment.task_id
+по [контракту адаптивной практики](adaptive-practice.md). Это события того же
+журнала; помощь до ответа не создаёт оценку или выполненное задание.

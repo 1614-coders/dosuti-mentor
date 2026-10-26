@@ -6,7 +6,7 @@ from pathlib import Path
 from atomic_files import atomic_json
 from profile_storage import checked
 from storage_lock import file_lock
-from read_snapshot import cached
+from read_snapshot import cached, observed
 
 SCHEMA='study_units_v1'
 MAX_UNITS=500
@@ -137,6 +137,16 @@ def text_bytes(path):
     return raw
 
 
+@cached(limit=1)
+@observed
+def _text_lines(path):
+    raw=text_bytes(path)
+    if len(raw)>8*1024*1024:raise ValueError('Text source exceeds 8 MiB')
+    if b'\0' in raw or raw.startswith((b'%PDF',b'PK\x03\x04')):raise ValueError('Provide extracted UTF-8 text, not PDF/ZIP/binary')
+    text=raw.decode('utf-8-sig');lines=text.splitlines()
+    return hashlib.sha256(raw).hexdigest(),lines
+
+
 def text_source(root,source,writing=False,pending=None):
     from source_integrity import digest as sha
     if writing:
@@ -151,12 +161,12 @@ def text_source(root,source,writing=False,pending=None):
         checked(root/'study-sources',True);path=root/expected;checked(path)
         if not path.is_file() or path.stat().st_size>8*1024*1024:
             raise ValueError('Text source snapshot missing or changed')
-        raw=text_bytes(path)
-        checksum=hashlib.sha256(raw).hexdigest()
+        checksum,lines=_text_lines(path)
         if checksum!=source['sha256']:raise ValueError('Text source snapshot changed')
-    if len(raw)>8*1024*1024:raise ValueError('Text source exceeds 8 MiB')
-    if b'\0' in raw or raw.startswith((b'%PDF',b'PK\x03\x04')):raise ValueError('Provide extracted UTF-8 text, not PDF/ZIP/binary')
-    text=raw.decode('utf-8-sig');lines=text.splitlines()
+    if writing:
+        if len(raw)>8*1024*1024:raise ValueError('Text source exceeds 8 MiB')
+        if b'\0' in raw or raw.startswith((b'%PDF',b'PK\x03\x04')):raise ValueError('Provide extracted UTF-8 text, not PDF/ZIP/binary')
+        text=raw.decode('utf-8-sig');lines=text.splitlines()
     if source['end_line']>len(lines):raise ValueError('Text source line range exceeds content')
     excerpt='\n'.join(lines[source['start_line']-1:source['end_line']])
     if len(excerpt)>100_000:raise ValueError('Use a smaller source line range (up to 100000 characters)')

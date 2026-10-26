@@ -7,9 +7,17 @@ import re
 import stat
 from contextvars import ContextVar
 from functools import wraps
+from read_snapshot import watch
 
 _VERIFICATION=ContextVar("lecture_verification",default=None)
 _HASH_PATHS=ContextVar('lecture_hash_paths',default=None)
+
+
+def include_verification_path(path):
+    """Enroll a final source after acquisition, never its renamed staging file."""
+    if _VERIFICATION.get() is not None and _HASH_PATHS.get() is not None:
+        _HASH_PATHS.get().add(str(Path(path).absolute()))
+
 
 def identity(path):
     value=Path(path).stat()
@@ -21,21 +29,27 @@ def drift(path,before,after,stage):
     return ValueError('Source changed during '+stage+': '+json.dumps(dict(file=str(Path(path).absolute()),changes=changes),ensure_ascii=False))
 
 
-def verification_session(function=None, *, paths=None):
+def verification_session(function=None, *, paths=None, rehash=False):
     """Reuse hashes only within one read operation; recheck identities before return."""
     if function is None:
-        return lambda target: verification_session(target, paths=paths)
+        return lambda target: verification_session(target, paths=paths, rehash=rehash)
     @wraps(function)
     def wrapped(*args,**kwargs):
-        if _VERIFICATION.get() is not None:return function(*args,**kwargs)
+        if _VERIFICATION.get() is not None and not rehash:return function(*args,**kwargs)
         allowed = None if paths is None else {str(Path(p).absolute()) for p in paths(*args, **kwargs)}
         cache={};token=_VERIFICATION.set(cache)
         scope_token = _HASH_PATHS.set(allowed)
         try:
             result=function(*args,**kwargs)
-            for name,(before,_) in cache.items():
+            for name,(before,checksum) in cache.items():
                 after=identity(name)
                 if after!=before:raise drift(name,before,after,'verification')
+                if rehash:
+                    # Creation-time metadata cannot replace a final byte check.
+                    verify_token=_VERIFICATION.set(None)
+                    try:
+                        if file_hash(name)!=checksum:raise ValueError('Source changed during verification: '+name)
+                    finally:_VERIFICATION.reset(verify_token)
             return result
         finally:
             _HASH_PATHS.reset(scope_token)
@@ -44,16 +58,19 @@ def verification_session(function=None, *, paths=None):
 
 
 def file_hash(path):
-    path=Path(path);name=str(path.absolute());before=identity(path);cache=_VERIFICATION.get()
+    path=Path(path);watch(path)
+    name=str(path.absolute());before=identity(path);cache=_VERIFICATION.get()
     allowed = _HASH_PATHS.get()
     if allowed is not None and name not in allowed: cache = None
     if cache is not None and name in cache:
         if cache[name][0]!=before:raise drift(path,cache[name][0],before,'verification')
+        watch(path)
         return cache[name][1]
     with path.open('rb') as stream:
         checksum=hashlib.file_digest(stream, 'sha256').hexdigest()
     after=identity(path)
     if after!=before:raise drift(path,before,after,'hashing')
+    watch(path)
     if cache is not None:cache[name]=(before,checksum)
     return checksum
 

@@ -7,6 +7,7 @@ from pathlib import Path
 from asr_quality import diagnose
 from source_integrity import (file_hash, source_matches, verify_evidence,
                               check_local_video, verify_snapshot, digest)
+from read_snapshot import watch
 
 
 def read(path):
@@ -237,8 +238,10 @@ def assemble(directory, data, start, window, include_code_stages=True, include_t
         path = (folder / row['file']).resolve()
         if not path.is_relative_to(folder) or not path.is_file():
             raise ValueError(f'Missing frame or frame outside fragment folder: {path}')
+        watch(path)
         with path.open('rb') as stream:
             checksum = hashlib.file_digest(stream, 'sha256').hexdigest()
+        watch(path)
         if checksum != digest(row.pop('_expected_sha256'), 'Selected frame SHA256'):
             raise ValueError(f'Selected frame integrity changed: {path}')
         row.update(absolute_path=str(path), sha256=checksum)
