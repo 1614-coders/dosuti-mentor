@@ -59,19 +59,6 @@ jobs:
           python -m pip install --only-binary=:all: -r plugins/dosuti-mentor/scripts/requirements.txt
       - name: Run supported Windows checks
         working-directory: plugins/dosuti-mentor/tests
-        run: python -B -m unittest -v test_windows_runtime test_windows_onboarding test_platform_diagnostics
-
-  failure-probe:
-    name: Temporary / failure propagation proof
-    runs-on: ubuntu-latest
-    timeout-minutes: 2
-    steps:
-      - name: Intentional failing unittest; remove after observing red CI
         run: |
-          python3 - <<'PY'
-          import unittest
-          class FailurePropagationProbe(unittest.TestCase):
-              def test_intentional_failure(self):
-                  self.fail('Intentional CI failure propagation probe')
-          unittest.main()
-          PY
+          Get-Command tar, tar.exe | Format-Table CommandType, Name, Source
+          python -B -m unittest -v test_windows_runtime test_windows_onboarding test_platform_diagnostics
