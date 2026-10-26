@@ -30,7 +30,7 @@ class WindowsRuntime(unittest.TestCase):
         if os.name != 'nt':
             # Only the executable lookup is replaced; run the real extraction.
             code = code.replace('; $homePath=',
-                '; function Get-DoSutiTar { (Get-Command tar -CommandType Application).Source }; $homePath=', 1)
+                '; function Get-DoSutiTar { (Get-Command tar -CommandType Application | Select-Object -First 1).Source }; $homePath=', 1)
         encoded = base64.b64encode(code.encode('utf-16-le')).decode()
         result = subprocess.run([PWSH, '-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', encoded],
                                 capture_output=True, text=True, timeout=40)
