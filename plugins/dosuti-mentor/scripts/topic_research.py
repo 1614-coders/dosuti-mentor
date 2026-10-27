@@ -2,9 +2,11 @@
 from copy import deepcopy
 import hashlib
 import json
+import os
+import tempfile
 from pathlib import Path
 from urllib.parse import urlsplit
-from atomic_files import atomic_bytes, atomic_json
+from atomic_files import atomic_json
 from profile_storage import checked
 from storage_lock import file_lock
 
@@ -140,6 +142,7 @@ def research(args):
             checked(unit_lock);checked(lock);data,state=load()
             if expected!=data['revision']:raise ValueError('Research changed; read before writing')
             apply(deepcopy(state),value)
+            pending=None
             if value['action']=='review':snapshot(folder,state['sources'][value['source_id']])
             if value['action']=='capture' and value['status']=='captured':
                 source=Path(value['text_file']).expanduser();checked(source)
@@ -151,17 +154,44 @@ def research(args):
                 checksum=hashlib.sha256(raw).hexdigest()
                 value={k:v for k,v in value.items() if k!='text_file'}
                 value.update(snapshot='snapshots/'+checksum+'.txt',sha256=checksum,characters=len(content))
-                # Enforce budgets before writing any snapshot.
                 apply(deepcopy(state),value,True)
-                for p in (parent,folder,folder/'snapshots'):p.mkdir(exist_ok=True);checked(p,True)
-                target=folder/value['snapshot'];checked(target)
-                if target.exists():snapshot(folder,value)
-                else:atomic_bytes(target,raw);target.chmod(target.stat().st_mode & ~0o222)
+                pending=(folder/value['snapshot'],raw)
             event=dict(revision=expected+1,at=course.now(),value=value);event['sha256']=digest(event)
             data=dict(schema=SCHEMA,revision=expected+1,events=data['events']+[event]);replay(data)
             if len(json.dumps(data,ensure_ascii=False,indent=2).encode())>900000:raise ValueError('Research history limit reached; preserve/export')
-            for p in (parent,folder):p.mkdir(exist_ok=True);checked(p,True)
-            atomic_json(path,data)
+            # All validation, including the complete journal size, precedes publication.
+            staged=None;owned=None
+            try:
+                for p in (parent,folder):p.mkdir(exist_ok=True);checked(p,True)
+                if pending:
+                    target,raw=pending
+                    directory=folder/'snapshots';directory.mkdir(exist_ok=True);checked(directory,True)
+                    checked(target)
+                    if target.exists():snapshot(folder,value)
+                    else:
+                        # Keep the inode identity across the atomic rename, even if it raises.
+                        fd,temporary=tempfile.mkstemp(prefix='.capture-',suffix='.tmp',dir=directory)
+                        staged=Path(temporary)
+                        with os.fdopen(fd,'wb') as stream:
+                            info=os.fstat(stream.fileno());owned=(info.st_dev,info.st_ino)
+                            stream.write(raw);stream.flush();os.fsync(stream.fileno())
+                        staged.rename(target)
+                        target.chmod(target.stat().st_mode & ~0o222)
+                atomic_json(path,data)
+            except BaseException as error:
+                if owned is not None:
+                    try:
+                        # A writer can raise after replace: durable references win over the exception.
+                        _,saved,_=load_research(root,name)
+                        registered=any(e['value'].get('snapshot')==value['snapshot'] for e in saved['events'])
+                        checked(target.parent,True)
+                        if not registered and checked(target)==owned:
+                            target.chmod(target.stat().st_mode | 0o200);target.unlink()
+                    except Exception as failure:
+                        error.add_note('Research snapshot preserved; rollback could not be verified: '+str(failure))
+                raise
+            finally:
+                if staged is not None and checked(staged)==owned:staged.unlink()
     data,state=load();sources=[]
     for identity,source in state['sources'].items():
         row=deepcopy(source);review=state['reviews'].get(identity);row.update(review=review,eligible=False,text=None)

@@ -3,7 +3,7 @@ from copy import deepcopy
 from pathlib import Path
 from profile_storage import checked
 from storage_lock import file_lock
-from learning_intent import text
+from learning_intent import text, validate_read_options
 from read_snapshot import cached
 
 SCHEMA = 'diagnostic_learning_v1'
@@ -442,11 +442,7 @@ def summary(current):
 
 
 def view(args):
-    import course
-    session = getattr(args, 'session', None)
-    if session is not None: course.slug(session)
-    limit = getattr(args, 'history_limit', 0)
-    if type(limit) is not int or not 0 <= limit <= 100: raise ValueError('History limit must be 0..100')
+    _, limit = validate_read_options(args)
     path = path_for(args)
     try: journal, attempts = load(path)
     except (ValueError, OSError) as error:
@@ -506,7 +502,7 @@ def diagnostic(args):
         value = validate(value, new=True); text(getattr(args, 'reason', None), 'Reason')
         expected = getattr(args, 'expected_revision', None)
         if type(expected) is not int or expected < 0: raise ValueError('Diagnostic write requires --expected-revision')
-        view(args)  # Validate read options before writing.
+        validate_read_options(args)
         path = path_for(args)
         for directory in (path.parent.parent, path.parent):
             directory.mkdir(exist_ok=True); checked(directory, True)

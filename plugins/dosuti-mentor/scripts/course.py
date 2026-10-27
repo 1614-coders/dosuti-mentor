@@ -1,5 +1,6 @@
 """Local course storage and processing. No paid APIs and no automatic teaching."""
 import argparse
+import atomic_files
 from contextlib import closing, contextmanager
 import difflib
 from datetime import datetime, timezone
@@ -52,16 +53,8 @@ def save(path, value):
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.name == 'lesson.json':
         value = anchored(value, path)
-    temp = path.with_name(path.name + '.' + uuid.uuid4().hex + '.tmp')
-    try:
-        with temp.open('w', encoding='utf-8') as stream:
-            stream.write(json.dumps(value, ensure_ascii=False, indent=2))
-            stream.flush()
-            import os
-            os.fsync(stream.fileno())
-        temp.replace(path)
-    finally:
-        temp.unlink(missing_ok=True)
+    with atomic_files.atomic_writer(path, encoding='utf-8') as stream:
+        stream.write(json.dumps(value, ensure_ascii=False, indent=2))
 
 
 def update_lesson(directory, change):
@@ -216,6 +209,12 @@ def read_progress_database(args):
     finally:connection.close()
 
 
+def _progress_row(row):
+    """Normalize legacy rows without migrating SQLite or reordering modern fields."""
+    value=dict(row)
+    return value if 'homework_revision' in value else dict(homework_revision=None,**value)
+
+
 def read_progress(args):
     """Read legacy SQLite without creating a profile, migrating tables or writing."""
     result=dict(progress=[],events=[],event_count=0,chat_bindings=[])
@@ -223,8 +222,7 @@ def read_progress(args):
         if connection is None:return result
         tables={row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         if 'progress' in tables:
-            result['progress']=[dict(homework_revision=None,**dict(row)) if 'homework_revision' not in row.keys() else dict(row)
-                                for row in connection.execute('SELECT * FROM progress ORDER BY updated,lesson,topic')]
+            result['progress']=[_progress_row(row) for row in connection.execute('SELECT * FROM progress ORDER BY updated,lesson,topic')]
         if 'events' in tables:
             result['event_count']=connection.execute('SELECT count(*) FROM events').fetchone()[0]
             result['events']=[dict(row) for row in connection.execute('SELECT * FROM events ORDER BY id DESC LIMIT 100')][::-1]
@@ -774,19 +772,22 @@ def status(args):
                       'progress': states, 'chat_bindings': bindings}, ensure_ascii=False, indent=2))
 
 
-def history(args):
+def history_data(args):
+    """Return validated lesson history without CLI output or storage writes."""
     lesson_path(args)
     if args.limit <= 0 or args.limit > 1000:
         raise ValueError('History limit must be between 1 and 1000')
     events = []
     with read_progress_database(args) as connection:
         if connection is not None and connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='events'").fetchone():
-            events = [dict(homework_revision=None, **dict(row)) if 'homework_revision' not in row.keys() else dict(row)
-                      for row in connection.execute(
+            events = [_progress_row(row) for row in connection.execute(
                           'SELECT * FROM events WHERE lesson=? ORDER BY id DESC LIMIT ?',
                           (args.lesson, args.limit))]
-    print(json.dumps({'lesson': args.lesson, 'profile': args.profile,
-                      'events': events}, ensure_ascii=False, indent=2))
+    return {'lesson': args.lesson, 'profile': args.profile, 'events': events}
+
+
+def history(args):
+    print(json.dumps(history_data(args), ensure_ascii=False, indent=2))
 
 
 def make_portable(args):

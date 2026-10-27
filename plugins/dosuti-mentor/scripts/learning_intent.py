@@ -26,6 +26,17 @@ def text(value, label, limit=4000):
     return value
 
 
+def validate_read_options(args):
+    """Validate request fields without reading journals or calculating progress."""
+    import course
+    session=getattr(args,'session',None)
+    if session is not None:course.slug(session)
+    limit=getattr(args,'history_limit',0)
+    if type(limit) is not int or not 0<=limit<=100:
+        raise ValueError('History limit must be 0..100')
+    return session,limit
+
+
 def patch_value(value, session):
     import course
     if not isinstance(value, dict) or not value or set(value) - {'goal','proposal','accept_proposal','session','learning_context'}:
@@ -456,13 +467,8 @@ def path_for(args):
 
 
 def view(args):
-    import course
     path=path_for(args)
-    session=getattr(args,'session',None)
-    if session is not None: course.slug(session)
-    limit=getattr(args,'history_limit',0)
-    if type(limit) is not int or not 0<=limit<=100:
-        raise ValueError('History limit must be 0..100')
+    session,limit=validate_read_options(args)
     try: journal,state=load(path)
     except (ValueError,OSError) as error:
         progress=learning_progress(args,dict(plan=None))
@@ -514,8 +520,8 @@ def commit(args,changes,sources_locked=False):
     text(getattr(args,'reason',None),'Reason')
     expected=getattr(args,'expected_revision',None)
     if type(expected) is not int or expected<0:raise ValueError('Intent update requires --expected-revision')
-    view(args)  # Validate read options before any write.
-    path=path_for(args);source_lock=course.root(args)/'.study-units.lock';checked(source_lock)
+    path=path_for(args);validate_read_options(args)
+    source_lock=course.root(args)/'.study-units.lock';checked(source_lock)
     with ExitStack() as stack:
         if not sources_locked:stack.enter_context(file_lock(source_lock))
         checked(source_lock)
