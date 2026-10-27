@@ -44,46 +44,112 @@ function ConvertTo-DoSutiArgument([string]$Value) {
     return '"' + [regex]::Replace($escaped, '(\\+)$', '$1$1') + '"'
 }
 
-function Test-DoSutiPython([string]$Executable, [string[]]$LauncherArgs = @()) {
-    if ($Executable -match '[\\/]WindowsApps[\\/]python') { return $null }
-    $code = @'
-import sys, struct, platform, json, ssl, venv, ensurepip, tempfile, shutil, subprocess
-assert sys.platform == 'win32' and sys.implementation.name == 'cpython'
-assert sys.version_info[:2] in ((3, 11), (3, 12)) and struct.calcsize('P') == 8
-assert platform.machine().lower() in ('amd64', 'x86_64')
-assert 'windowsapps' not in (sys.executable + sys.base_prefix).lower()
-folder = tempfile.mkdtemp(prefix='python-probe-')
-try:
-    venv.EnvBuilder(with_pip=True).create(folder)
-    subprocess.run([folder + '/Scripts/python.exe', '-I', '-m', 'pip', '--version'], check=True, capture_output=True)
-finally:
-    shutil.rmtree(folder)
-print(json.dumps(dict(executable=sys.executable, version=platform.python_version(), architecture=platform.machine())))
-'@
+function Wait-DoSutiProbe($Process, [int]$Milliseconds) { return $Process.WaitForExit($Milliseconds) }
+
+function Stop-DoSutiProbe($Process) {
+    try { $processId = $Process.Id }
+    catch { return } # Start failed: no process exists.
+    if ($Process.HasExited) { return }
     $info = New-Object Diagnostics.ProcessStartInfo
-    $info.FileName = $Executable
-    $info.Arguments = ((@($LauncherArgs) + @('-I','-B','-c',$code)) | ForEach-Object { ConvertTo-DoSutiArgument $_ }) -join ' '
+    $info.FileName = Join-Path ([Environment]::SystemDirectory) 'taskkill.exe'
+    $info.Arguments = '/PID ' + $processId + ' /T /F'
     $info.UseShellExecute = $false
     $info.CreateNoWindow = $true
     $info.RedirectStandardOutput = $true
     $info.RedirectStandardError = $true
-    foreach ($key in @('PYLAUNCHER_ALLOW_INSTALL','PYLAUNCHER_ALWAYS_INSTALL','PYLAUNCHER_DRYRUN')) {
-        $info.EnvironmentVariables.Remove($key)
-    }
-    $process = New-Object Diagnostics.Process
-    $process.StartInfo = $info
+    $killer = New-Object Diagnostics.Process
+    $killer.StartInfo = $info
     try {
+        $killer.Start() | Out-Null
+        $null = $killer.StandardOutput.ReadToEndAsync()
+        $null = $killer.StandardError.ReadToEndAsync()
+        if (-not $killer.WaitForExit(10000)) {
+            $killer.Kill(); $killer.WaitForExit()
+            throw 'Python probe tree termination timed out; preserve its managed temporary folder.'
+        }
+        if ($killer.ExitCode -ne 0 -or -not $Process.WaitForExit(5000)) {
+            throw 'Cannot confirm Python probe tree termination; preserve its managed temporary folder.'
+        }
+    } finally {
+        try {
+            try { $killerId = $killer.Id } catch { $killerId = $null }
+            if ($null -ne $killerId -and -not $killer.HasExited) { $killer.Kill(); $null = $killer.WaitForExit(5000) }
+        } finally { $killer.Dispose() }
+    }
+}
+
+function Remove-DoSutiProbeFolder([string]$Path) {
+    Assert-DoSutiPath $Path
+    # Inspect each child before descending: PS 5.1 recursion can follow junctions.
+    foreach ($item in @(Get-ChildItem -LiteralPath $Path -Force)) {
+        Assert-DoSutiPath $item.FullName
+        if ($item.PSIsContainer) { Remove-DoSutiProbeFolder $item.FullName }
+        else { Remove-Item -LiteralPath $item.FullName -Force }
+    }
+    Remove-Item -LiteralPath $Path -Force
+}
+
+function Test-DoSutiPython([string]$Executable, [string[]]$LauncherArgs = @(),
+                         [string]$HomePath, [ValidateRange(1,60000)][int]$TimeoutMilliseconds = 60000) {
+    if ($Executable -match '[\\/]WindowsApps[\\/]python') { return $null }
+    if (-not $HomePath) { throw 'Python probing requires a managed DoSuti home.' }
+    $dataHome = Initialize-DoSutiHome $HomePath
+    $temporary = Join-Path $dataHome ('temp/python-probe-' + [guid]::NewGuid().ToString('N'))
+    Assert-DoSutiPath $temporary
+    if (Test-Path -LiteralPath $temporary) { throw 'Probe folder already exists; preserve it.' }
+    [IO.Directory]::CreateDirectory($temporary) | Out-Null
+    $process = $null
+    $code = @'
+import sys, struct, platform, json, ssl, venv, ensurepip, subprocess
+assert sys.platform == 'win32' and sys.implementation.name == 'cpython'
+assert sys.version_info[:2] in ((3, 11), (3, 12)) and struct.calcsize('P') == 8
+assert platform.machine().lower() in ('amd64', 'x86_64')
+assert 'windowsapps' not in (sys.executable + sys.base_prefix).lower()
+folder = sys.argv[1] + '/venv'
+venv.EnvBuilder(with_pip=True).create(folder)
+subprocess.run([folder + '/Scripts/python.exe', '-I', '-B', '-m', 'pip', '--version'], check=True, capture_output=True, timeout=45)
+print(json.dumps(dict(executable=sys.executable, version=platform.python_version(), architecture=platform.machine())))
+'@
+    try {
+        $info = New-Object Diagnostics.ProcessStartInfo
+        $info.FileName = $Executable
+        $info.Arguments = ((@($LauncherArgs) + @('-I','-B','-c',$code,$temporary)) | ForEach-Object { ConvertTo-DoSutiArgument $_ }) -join ' '
+        $info.UseShellExecute = $false
+        $info.CreateNoWindow = $true
+        $info.WorkingDirectory = $temporary
+        $info.RedirectStandardOutput = $true
+        $info.RedirectStandardError = $true
+        foreach ($key in @('TEMP','TMP','TMPDIR','PIP_CACHE_DIR')) { $info.EnvironmentVariables[$key] = $temporary }
+        $info.EnvironmentVariables['PYTHONDONTWRITEBYTECODE'] = '1'
+        $info.EnvironmentVariables['PIP_DISABLE_PIP_VERSION_CHECK'] = '1'
+        foreach ($key in @('PYLAUNCHER_ALLOW_INSTALL','PYLAUNCHER_ALWAYS_INSTALL','PYLAUNCHER_DRYRUN')) {
+            $info.EnvironmentVariables.Remove($key)
+        }
+        $process = New-Object Diagnostics.Process
+        $process.StartInfo = $info
         $process.Start() | Out-Null
         $stdout = $process.StandardOutput.ReadToEndAsync()
         $stderr = $process.StandardError.ReadToEndAsync()
-        if (-not $process.WaitForExit(60000)) {
-            & taskkill.exe /PID $process.Id /T /F 2>$null | Out-Null
-            return $null
-        }
+        if (-not (Wait-DoSutiProbe $process $TimeoutMilliseconds)) { return $null }
         if ($process.ExitCode -ne 0) { return $null }
+        if (-not $stdout.Wait(5000) -or -not $stderr.Wait(5000)) { return $null }
         return ($stdout.Result | ConvertFrom-Json)
-    } catch { return $null }
-    finally { $process.Dispose() }
+    } catch [OperationCanceledException] { throw }
+      catch [System.Management.Automation.PipelineStoppedException] { throw }
+      catch { return $null }
+    finally {
+        $stopped = $false
+        try {
+            if ($null -ne $process) {
+                try { Stop-DoSutiProbe $process }
+                catch { throw "Python probe cleanup failed; preserve $temporary. $_" }
+            }
+            $stopped = $true
+        } finally {
+            if ($null -ne $process) { $process.Dispose() }
+            if ($stopped) { Remove-DoSutiProbeFolder $temporary }
+        }
+    }
 }
 
 function Get-DoSutiTar {
@@ -91,9 +157,10 @@ function Get-DoSutiTar {
     return Join-Path ([Environment]::SystemDirectory) 'tar.exe'
 }
 
-function Install-DoSutiPython([string]$HomePath, $Spec) {
+function Install-DoSutiPython([string]$HomePath, $Spec, [string]$TargetName = 'python') {
+    if ($TargetName -notmatch '^python(?:-candidate-[a-f0-9]{32})?$') { throw 'Invalid private Python target.' }
     $runtime = Join-Path $HomePath 'runtime'
-    $target = Join-Path $runtime 'python'
+    $target = Join-Path $runtime $TargetName
     $python = Join-Path $target 'python.exe'
     if (Test-Path -LiteralPath $target) { throw 'Private Python is damaged or unverified; preserve runtime/python before repair.' }
     $cache = Join-Path $HomePath 'cache/python'
@@ -139,7 +206,7 @@ function Install-DoSutiPython([string]$HomePath, $Spec) {
         $candidate = Join-Path $staging 'python/python.exe'
         if ((Get-FileHash -LiteralPath $candidate -Algorithm SHA256).Hash -ne $Spec.python_exe_sha256) { throw 'Python executable SHA256 mismatch.' }
         Move-Item -LiteralPath (Join-Path $staging 'python') -Destination $target
-        $checked = Test-DoSutiPython $python
+        $checked = Test-DoSutiPython $python -HomePath $HomePath
         if (-not $checked) { throw 'Private Python cannot create a usable environment.' }
         return $checked
     } catch {
@@ -171,7 +238,7 @@ function Resolve-DoSutiPython([string]$HomePath, [string]$Explicit, $Spec, [swit
         if ($command) { $candidates += @{exe=$command.Source;args=@()} }
     }
     foreach ($candidate in $candidates) {
-        $selected = Test-DoSutiPython $candidate.exe $candidate.args
+        $selected = Test-DoSutiPython $candidate.exe $candidate.args -HomePath $HomePath
         if ($selected) {
             $selected | Add-Member -NotePropertyName owned -NotePropertyValue ($selected.executable -eq $private)
             return $selected
@@ -212,17 +279,32 @@ function Repair-DoSutiPython([string]$HomePath, $Spec, [switch]$Offline) {
     $lock = [IO.File]::Open($lockPath,[IO.FileMode]::OpenOrCreate,[IO.FileAccess]::ReadWrite,[IO.FileShare]::ReadWrite)
     $locked = $false
     $backup = Join-Path $HomePath ('runtime/python-previous-' + [guid]::NewGuid().ToString('N'))
+    $candidateName = 'python-candidate-' + [guid]::NewGuid().ToString('N')
+    $candidate = Join-Path $HomePath ('runtime/' + $candidateName)
+    $prepared = $false
     $moved = $false
     try {
         if ($lock.Length -eq 0) { $lock.SetLength(1) }
         try { Lock-DoSutiHeavyFile $lock; $locked=$true }
         catch { throw 'Another DoSuti worker is active; retry Python repair after processing finishes.' }
+        # Download, hash and probe the replacement while the previous tree stays put.
+        $selected = Install-DoSutiPython $HomePath $Spec -TargetName $candidateName
+        $prepared = $true
         # Preserve the old tree, including unknown files, rather than deleting it.
         Move-Item -LiteralPath $target -Destination $backup
         $moved = $true
-        try { $selected=Install-DoSutiPython $HomePath $Spec }
+        try {
+            Move-Item -LiteralPath $candidate -Destination $target
+            $python = Join-Path $target 'python.exe'
+            if ((Get-FileHash -LiteralPath $python -Algorithm SHA256).Hash -ne $Spec.python_exe_sha256) { throw 'Python executable SHA256 mismatch.' }
+            $selected = Test-DoSutiPython $python -HomePath $HomePath
+            if (-not $selected) { throw 'Published Python failed verification.' }
+        }
         catch {
-            if (Test-Path -LiteralPath $target) { throw "Repair interrupted; preserve both $target and $backup for recovery. $_" }
+            if (Test-Path -LiteralPath $target) {
+                if (Test-Path -LiteralPath $candidate) { throw "Repair interrupted; preserve $target and $backup for recovery. $_" }
+                Move-Item -LiteralPath $target -Destination $candidate
+            }
             Move-Item -LiteralPath $backup -Destination $target
             $moved = $false
             throw
@@ -230,8 +312,12 @@ function Repair-DoSutiPython([string]$HomePath, $Spec, [switch]$Offline) {
         $selected | Add-Member -NotePropertyName recovery_backup -NotePropertyValue $backup
         return $selected
     } finally {
-        if ($locked) { Unlock-DoSutiHeavyFile $lock }
-        $lock.Dispose()
+        try {
+            if ($prepared -and (Test-Path -LiteralPath $candidate)) { Remove-Item -LiteralPath $candidate -Recurse -Force }
+        } finally {
+            try { if ($locked) { Unlock-DoSutiHeavyFile $lock } }
+            finally { $lock.Dispose() }
+        }
         if ($moved) { Write-Host "Previous Python preserved at $backup" }
     }
 }

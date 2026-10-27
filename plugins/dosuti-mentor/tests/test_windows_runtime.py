@@ -37,6 +37,68 @@ class WindowsRuntime(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         return result.stdout
 
+    def probe_command(self, code, milliseconds=5000):
+        literal=lambda s:"'"+str(s).replace("'","''")+"'"
+        return (f'Test-DoSutiPython {literal(sys.executable)} @({literal("-c")},{literal(code)}) '
+                f'-HomePath $homePath -TimeoutMilliseconds {milliseconds}')
+
+    def test_probe_environment_cleanup_errors_and_repeat(self):
+        success=self.probe_command('import os,json;from pathlib import Path;print(json.dumps(dict(temporary=os.environ["TEMP"],tmp=os.environ["TMP"],tmpdir=os.environ["TMPDIR"],cwd=str(Path.cwd()))))')
+        failure=self.probe_command('from pathlib import Path;Path("partial").write_text("fixture");raise RuntimeError("probe failed")')
+        self.run_ps("""
+Initialize-DoSutiHome $homePath | Out-Null
+$temporary=Join-Path $homePath 'temp';$keep=Join-Path $temporary 'user-file';[IO.File]::WriteAllText($keep,'keep')
+foreach($attempt in 1..2) {
+ $result=SUCCESS
+ if((Split-Path -Parent $result.temporary) -ne $temporary -or $result.temporary -ne $result.tmp -or $result.tmp -ne $result.tmpdir -or $result.cwd -ne $result.temporary) {throw 'probe escaped managed temp'}
+ if(Test-Path -LiteralPath $result.temporary) {throw 'successful probe left temporary files'}
+ if(FAILURE) {throw 'failed probe accepted'}
+ if(Test-DoSutiPython (Join-Path $homePath 'missing-python.exe') -HomePath $homePath) {throw 'missing Python accepted'}
+ if(@(Get-ChildItem -LiteralPath $temporary -Force).Count -ne 1) {throw 'probe left temporary files'}
+ if((Get-Content -LiteralPath $keep -Raw) -ne 'keep') {throw 'foreign file deleted'}
+}
+""".replace('SUCCESS',success).replace('FAILURE',failure))
+
+    def test_probe_cancellation_stops_process_before_cleanup(self):
+        stop=''
+        if os.name != 'nt':
+            stop="function Stop-DoSutiProbe {param($Process) if(-not $Process.HasExited) {$Process.Kill();$Process.WaitForExit()} }"
+        self.run_ps("""
+Initialize-DoSutiHome $homePath | Out-Null
+STOP
+function Wait-DoSutiProbe {param($Process,$Milliseconds) $script:probeId=$Process.Id;throw [OperationCanceledException]::new('fixture cancelled')}
+try { PROBE;throw 'unexpected success' }
+catch [OperationCanceledException] {if($_.Exception.Message -notmatch 'fixture cancelled') {throw}}
+if(Get-Process -Id $script:probeId -ErrorAction SilentlyContinue) {throw 'cancelled probe process remains'}
+if(@(Get-ChildItem -LiteralPath (Join-Path $homePath 'temp') -Force).Count) {throw 'cancelled probe left files'}
+""".replace('STOP',stop).replace('PROBE',self.probe_command('import time;time.sleep(60)')))
+
+    def test_probe_cleanup_refuses_link_to_foreign_files(self):
+        self.run_ps('Initialize-DoSutiHome $homePath | Out-Null')
+        outside=self.base/'outside';outside.mkdir();(outside/'keep').write_text('user data')
+        probe=self.home/'temp'/'python-probe-fixture';probe.mkdir()
+        try:(probe/'link').symlink_to(outside,target_is_directory=True)
+        except OSError:self.skipTest('Directory symlink unavailable for cleanup boundary test')
+        self.run_ps("try {Remove-DoSutiProbeFolder (Join-Path $homePath 'temp/python-probe-fixture');throw 'unexpected deletion'} "
+                    "catch {if($_.Exception.Message -notmatch 'Links/junctions') {throw}}")
+        self.assertEqual((outside/'keep').read_text(),'user data')
+        self.assertTrue((probe/'link').is_symlink())
+
+    @unittest.skipUnless(os.name=='nt','Native taskkill process-tree cleanup requires Windows')
+    def test_probe_timeout_stops_child_tree_and_removes_only_owned_folder(self):
+        pidfile=self.home/'child.pid'
+        code=('import sys,subprocess,time;from pathlib import Path;'
+              'p=subprocess.Popen([sys.executable,"-c","import time;time.sleep(60)"]);'
+              f'Path({str(pidfile)!r}).write_text(str(p.pid));time.sleep(60)')
+        self.run_ps("""
+Initialize-DoSutiHome $homePath | Out-Null
+if(PROBE) {throw 'timed-out probe accepted'}
+$childId=[int](Get-Content -LiteralPath (Join-Path $homePath 'child.pid') -Raw)
+for($i=0;$i -lt 50 -and (Get-Process -Id $childId -ErrorAction SilentlyContinue);$i++) {Start-Sleep -Milliseconds 100}
+if(Get-Process -Id $childId -ErrorAction SilentlyContinue) {throw 'probe descendant remains'}
+if(@(Get-ChildItem -LiteralPath (Join-Path $homePath 'temp') -Force).Count) {throw 'timed-out probe left files'}
+""".replace('PROBE',self.probe_command(code,3000)))
+
     def test_install_script_parses(self):
         path = PACKAGE / 'Install-DoSuti.ps1'
         self.run_ps("$e=$null; [Management.Automation.Language.Parser]::ParseFile('" +
@@ -186,12 +248,15 @@ $folder=Join-Path $homePath 'runtime/python';[IO.Directory]::CreateDirectory($fo
 # Byte-range lock interoperability has a separate native Windows test.
 function Lock-DoSutiHeavyFile {}
 function Unlock-DoSutiHeavyFile {}
-function Install-DoSutiPython {param($HomePath,$Spec)
- $target=Join-Path $HomePath 'runtime/python';[IO.Directory]::CreateDirectory($target) | Out-Null
+function Install-DoSutiPython {param($HomePath,$Spec,$TargetName='python')
+ if(-not (Test-Path -LiteralPath (Join-Path $HomePath 'runtime/python/python.exe'))) {throw 'old tree moved before preparation'}
+ $target=Join-Path $HomePath ('runtime/'+$TargetName);[IO.Directory]::CreateDirectory($target) | Out-Null
  [IO.File]::WriteAllText((Join-Path $target 'python.exe'),'verified fixture')
  [pscustomobject]@{executable=(Join-Path $target 'python.exe')}
 }
-$r=Repair-DoSutiPython $homePath ([pscustomobject]@{})
+function Test-DoSutiPython {param($Executable) [pscustomobject]@{executable=$Executable} }
+$sha=[BitConverter]::ToString([Security.Cryptography.SHA256]::Create().ComputeHash([Text.Encoding]::UTF8.GetBytes('verified fixture'))).Replace('-','')
+$r=Repair-DoSutiPython $homePath ([pscustomobject]@{python_exe_sha256=$sha})
 if((Get-Content -LiteralPath (Join-Path $r.recovery_backup 'python.exe') -Raw) -ne 'old damaged bytes') {throw 'backup lost'}
 if((Get-Content -LiteralPath $r.executable -Raw) -ne 'verified fixture') {throw 'replacement missing'}
 """)
@@ -210,6 +275,35 @@ if((Get-Content -LiteralPath $file -Raw) -ne 'preserve') {throw 'rollback lost o
 try {Repair-DoSutiPython $homePath ([pscustomobject]@{sha256=('0'*64)}) -Offline;throw 'unexpected success'}
 catch {if($_.Exception.Message -notmatch 'verified cached archive') {throw}}
 if((Get-Content -LiteralPath $file -Raw) -ne 'preserve') {throw 'offline mutated original'}
+""")
+
+    def test_published_verification_interrupt_restores_previous_and_retry_keeps_backup(self):
+        self.run_ps("""
+Initialize-DoSutiHome $homePath | Out-Null
+$old=Join-Path $homePath 'runtime/python';[IO.Directory]::CreateDirectory($old) | Out-Null
+[IO.File]::WriteAllText((Join-Path $old 'python.exe'),'previous bytes')
+function Lock-DoSutiHeavyFile {}
+function Unlock-DoSutiHeavyFile {}
+function Install-DoSutiPython {param($HomePath,$Spec,$TargetName='python')
+ if((Get-Content -LiteralPath (Join-Path $HomePath 'runtime/python/python.exe') -Raw) -ne 'previous bytes') {throw 'old tree moved before preparation'}
+ $target=Join-Path $HomePath ('runtime/'+$TargetName);[IO.Directory]::CreateDirectory($target) | Out-Null
+ [IO.File]::WriteAllText((Join-Path $target 'python.exe'),'new bytes')
+ [pscustomobject]@{executable=(Join-Path $target 'python.exe')}
+}
+$script:interrupt=$true
+function Test-DoSutiPython {param($Executable)
+ if((Get-Content -LiteralPath $Executable -Raw) -ne 'new bytes') {throw 'previous Python was executed'}
+ if($script:interrupt) {throw [OperationCanceledException]::new('fixture interrupted')}
+ [pscustomobject]@{executable=$Executable}
+}
+$sha=[BitConverter]::ToString([Security.Cryptography.SHA256]::Create().ComputeHash([Text.Encoding]::UTF8.GetBytes('new bytes'))).Replace('-','')
+$spec=[pscustomobject]@{python_exe_sha256=$sha}
+try {Repair-DoSutiPython $homePath $spec;throw 'unexpected success'}
+catch {if($_.Exception.Message -notmatch 'fixture interrupted') {throw}}
+if((Get-Content -LiteralPath (Join-Path $old 'python.exe') -Raw) -ne 'previous bytes') {throw 'rollback lost original'}
+$script:interrupt=$false
+$r=Repair-DoSutiPython $homePath $spec
+if((Get-Content -LiteralPath (Join-Path $r.recovery_backup 'python.exe') -Raw) -ne 'previous bytes') {throw 'retry lost backup'}
 """)
 
     def test_busy_repair_preserves_original(self):

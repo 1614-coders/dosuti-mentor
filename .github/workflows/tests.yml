@@ -61,7 +61,7 @@ jobs:
         working-directory: plugins/dosuti-mentor/tests
         run: |
           Get-Command tar, tar.exe | Format-Table CommandType, Name, Source
-          python -B -m unittest -v test_windows_runtime test_windows_onboarding test_platform_diagnostics
+          python -B -m unittest -v test_windows_runtime test_windows_onboarding test_platform_diagnostics test_history_read_only test_runtime_repair test_python_probe test_import_rollback test_practice_reuse test_operation_reuse test_adaptive_practice test_learning_progress
       - name: Run Windows PowerShell 5.1 checks
         working-directory: plugins/dosuti-mentor/tests
         shell: powershell
@@ -69,4 +69,4 @@ jobs:
           DOSUTI_TEST_PWSH: C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe
         run: |
           Get-Command Get-FileHash | Format-Table Name, Source
-          python -B -m unittest -v test_windows_runtime test_windows_onboarding test_platform_diagnostics
+          python -B -m unittest -v test_windows_runtime test_windows_onboarding test_platform_diagnostics test_history_read_only test_runtime_repair test_python_probe test_import_rollback test_practice_reuse test_operation_reuse test_adaptive_practice test_learning_progress

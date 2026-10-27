@@ -9,6 +9,7 @@ import uuid
 import venv
 from managed_storage import find_home, initialize, session, safe
 from storage_lock import file_lock
+from bootstrap import verify_python
 
 
 def install(runtime):
@@ -20,6 +21,7 @@ def install(runtime):
         if not config.is_file(): raise ValueError('Unknown venv folder; preserve it before repair')
     staging = safe(runtime / ('venv-staging-' + uuid.uuid4().hex))
     backup = None
+    prepared = False
     try:
         venv.EnvBuilder(with_pip=True).create(staging)
         python = staging / ('Scripts/python.exe' if sys.platform == 'win32' else 'bin/python')
@@ -28,17 +30,25 @@ def install(runtime):
                         '--cache-dir', cache,
                         '--only-binary=:all:', '-r', str(Path(__file__).with_name('requirements.txt'))],
                        env=dict(os.environ, PIP_CONFIG_FILE=os.devnull), check=True)
+        verify_python(python, runner=subprocess.run)
+        prepared = True
         if target.exists():
             backup = runtime / ('venv-previous-' + uuid.uuid4().hex)
             target.rename(backup)
-        try: staging.rename(target)
-        except BaseException:
-            if backup is not None: backup.rename(target)
-            raise
+        staging.rename(target)
+        verify_python(target / python.relative_to(staging), runner=subprocess.run)
     except BaseException:
+        # Renames can succeed immediately before an interrupt; inspect actual paths.
+        # Never delete the old environment, even if rollback itself cannot complete.
+        if backup is not None and backup.exists():
+            if target.exists():
+                target.rename(runtime / ('venv-failed-' + uuid.uuid4().hex))
+            backup.rename(target)
+        elif prepared and not staging.exists() and target.exists():
+            target.rename(staging)  # Failed first install must not look ready.
         if staging.exists(): shutil.rmtree(staging)
         raise
-    if backup is not None: shutil.rmtree(backup)
+    if backup is not None: print('Previous environment preserved at:', backup)
     return target / ('Scripts/python.exe' if sys.platform == 'win32' else 'bin/python')
 
 

@@ -1,5 +1,6 @@
 """Local course storage and processing. No paid APIs and no automatic teaching."""
 import argparse
+from contextlib import contextmanager
 import difflib
 from datetime import datetime, timezone
 import hashlib
@@ -24,6 +25,7 @@ from source_integrity import (digest, source_matches, verify_evidence, check_loc
 from video_sources import verification_paths as video_verification_paths
 from read_snapshot import observed, watch
 from cli_output import emit
+from material_import import importing, reserve
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 
@@ -130,9 +132,20 @@ def init(args):
 
 
 def db(args):
+    """Writer-only entry: explicitly initialize and migrate before mutation."""
     from profile_storage import open_progress
     connection = open_progress(root(args), slug(getattr(args, 'profile', 'default')))
     connection.row_factory = sqlite3.Row
+    try:
+        initialize_progress(connection)
+        migrate_progress(connection)
+    except BaseException:
+        connection.close()
+        raise
+    return connection
+
+
+def initialize_progress(connection):
     connection.executescript('''
         CREATE TABLE IF NOT EXISTS progress (
           lesson TEXT NOT NULL, topic TEXT NOT NULL, stage TEXT NOT NULL,
@@ -142,14 +155,16 @@ def db(args):
           stage TEXT NOT NULL, details TEXT NOT NULL, created TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS bindings (chat TEXT PRIMARY KEY, lesson TEXT NOT NULL);
     ''')
-    # Migrate a profile lazily. BEGIN IMMEDIATE also serializes two first readers.
+
+
+def migrate_progress(connection):
+    # Writer-side migration; BEGIN IMMEDIATE serializes concurrent first writers.
     with connection:
         connection.execute('BEGIN IMMEDIATE')
         for table in ['progress', 'events']:
             columns = {row['name'] for row in connection.execute(f'PRAGMA table_info({table})')}
             if 'homework_revision' not in columns:
                 connection.execute(f'ALTER TABLE {table} ADD COLUMN homework_revision TEXT')
-    return connection
 
 
 def visible_progress(rows, lessons):
@@ -176,13 +191,15 @@ def visible_progress(rows, lessons):
     return result
 
 
-def read_progress(args):
-    """Read legacy SQLite without creating a profile, migrating tables or writing."""
+@contextmanager
+def read_progress_database(args):
+    """Shared read-only boundary: never initialize, migrate or recover WAL."""
     from profile_storage import profile_path, checked
     path=profile_path(root(args),getattr(args,'profile','default'))/'progress.sqlite3'
-    result=dict(progress=[],events=[],event_count=0,chat_bindings=[])
     for suffix in ('','-journal','-wal','-shm'):watch(Path(str(path)+suffix))
-    if checked(path) is None:return result
+    if checked(path) is None:
+        yield None
+        return
     for suffix in ('-journal','-wal','-shm'):checked(Path(str(path)+suffix))
     # SQLite readers can write WAL shared-memory bookkeeping even with mode=ro.
     # Preserve such databases and report the limitation instead of touching them.
@@ -193,6 +210,17 @@ def read_progress(args):
     except sqlite3.Error as error:raise ValueError('Cannot read lesson progress: '+str(error)) from error
     connection.row_factory=sqlite3.Row
     try:
+        yield connection
+    except sqlite3.Error as error:
+        raise ValueError('Cannot read lesson progress: '+str(error)) from error
+    finally:connection.close()
+
+
+def read_progress(args):
+    """Read legacy SQLite without creating a profile, migrating tables or writing."""
+    result=dict(progress=[],events=[],event_count=0,chat_bindings=[])
+    with read_progress_database(args) as connection:
+        if connection is None:return result
         tables={row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         if 'progress' in tables:
             result['progress']=[dict(homework_revision=None,**dict(row)) if 'homework_revision' not in row.keys() else dict(row)
@@ -202,9 +230,6 @@ def read_progress(args):
             result['events']=[dict(row) for row in connection.execute('SELECT * FROM events ORDER BY id DESC LIMIT 100')][::-1]
         if 'bindings' in tables:
             result['chat_bindings']=[dict(row) for row in connection.execute('SELECT * FROM bindings ORDER BY chat')]
-    except sqlite3.Error as error:
-        raise ValueError('Cannot read lesson progress: '+str(error)) from error
-    finally:connection.close()
     return result
 
 
@@ -354,6 +379,7 @@ def attach(args):
     return attach_local(args)
 
 
+@importing
 def attach_local(args):
     directory = lesson_path(args)
     material = None
@@ -363,7 +389,7 @@ def attach_local(args):
     elif not args.source:
         raise ValueError('Provide --source or --none')
     elif args.kind == 'code':
-        target = directory / 'code' / uuid.uuid4().hex[:12]
+        target = reserve(directory / 'code' / uuid.uuid4().hex[:12], directory=True)
         if github_url(args.source):
             command = ['git', 'clone', '--depth', '1']
             if args.ref:
@@ -377,7 +403,7 @@ def attach_local(args):
             if source.is_dir():
                 if target.is_relative_to(source):
                     raise ValueError('Code source cannot contain the course storage')
-                shutil.copytree(source, target, symlinks=True,
+                shutil.copytree(source, target, symlinks=True, dirs_exist_ok=True,
                     ignore=shutil.ignore_patterns('.git', '.venv', 'venv', 'node_modules', 'target', '__pycache__'))
             elif source.is_file() and zipfile.is_zipfile(source):
                 with zipfile.ZipFile(source) as archive:
@@ -389,7 +415,6 @@ def attach_local(args):
                             raise ValueError('Archive contains unsafe paths or symbolic links')
                     archive.extractall(target)
             elif source.is_file():
-                target.mkdir()
                 shutil.copyfile(source, target / source.name)
             else:
                 raise ValueError('Provide a code folder, archive, file or GitHub repository URL')
@@ -406,7 +431,7 @@ def attach_local(args):
         source = Path(args.source).expanduser().resolve()
         if not source.is_file():
             raise ValueError('Save homework instructions as a local file first')
-        target = directory / 'homework' / (uuid.uuid4().hex[:8] + '-' + source.name)
+        target = reserve(directory / 'homework' / (uuid.uuid4().hex[:8] + '-' + source.name))
         target.parent.mkdir(exist_ok=True)
         shutil.copyfile(source, target)
         material = {'status': 'provided', 'file': str(target), 'sha256': file_hash(target),
@@ -419,7 +444,7 @@ def attach_local(args):
             source = Path(args.source).expanduser().resolve()
             if not source.is_file():
                 raise ValueError('Resource must be an HTTPS URL or a local file')
-            target = directory / 'resources' / (uuid.uuid4().hex[:8] + '-' + source.name)
+            target = reserve(directory / 'resources' / (uuid.uuid4().hex[:8] + '-' + source.name))
             target.parent.mkdir(exist_ok=True)
             shutil.copyfile(source, target)
             item = {'source': str(target), 'kind': args.resource_type, 'status': 'downloaded',
@@ -486,6 +511,7 @@ def checked_video(directory, data, fragments=4, site_timeout=1800, quality='best
 
 @managed_operation
 @tracked
+@importing
 def prepare(args):
     from model_readiness import checked_model, ModelNotReady, repair_type
     from publication import publish_job
@@ -513,8 +539,7 @@ def prepare(args):
             check_local_video(data['video'])
             source_matches(imported_manifest, data['video']['sha256'])
             verify_evidence(source, imported_manifest)
-            target = directory / 'prepared' / ('import-' + uuid.uuid4().hex[:8])
-            target.mkdir(parents=True)
+            target = reserve(directory / 'prepared' / ('import-' + uuid.uuid4().hex[:8]), directory=True)
             for name in ['manifest.json', 'transcript.json']:
                 shutil.copyfile(source / name, target / name)
             shutil.copytree(source / 'frames', target / 'frames')
@@ -753,10 +778,13 @@ def history(args):
     lesson_path(args)
     if args.limit <= 0 or args.limit > 1000:
         raise ValueError('History limit must be between 1 and 1000')
-    with db(args) as connection:
-        events = [dict(row) for row in connection.execute(
-            'SELECT * FROM events WHERE lesson=? ORDER BY id DESC LIMIT ?',
-            (args.lesson, args.limit))]
+    events = []
+    with read_progress_database(args) as connection:
+        if connection is not None and connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='events'").fetchone():
+            events = [dict(homework_revision=None, **dict(row)) if 'homework_revision' not in row.keys() else dict(row)
+                      for row in connection.execute(
+                          'SELECT * FROM events WHERE lesson=? ORDER BY id DESC LIMIT ?',
+                          (args.lesson, args.limit))]
     print(json.dumps({'lesson': args.lesson, 'profile': args.profile,
                       'events': events}, ensure_ascii=False, indent=2))
 
@@ -970,6 +998,11 @@ def main():
     from cli_output import validate_options
     validate_options(args,parser)
     try:
+        if args.command == 'history':
+            # A read must not create managed cache/temp directories or lease files.
+            find_home(args.course)  # Preserve managed-home/pending-cleanup validation.
+            history(args)
+            return
         if args.command in ('preparation-status', 'preparation-cancel', 'material-status'):
             # Observe a live preparation operation without taking its exclusive use lock
             # or creating a managed runtime/temp session.

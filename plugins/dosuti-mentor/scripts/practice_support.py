@@ -24,7 +24,7 @@ def validate(value):
     else:raise ValueError('Unknown practice action')
 
 
-def replay(tasks,event,lessons):
+def replay(tasks,event,lessons,help_index=None):
     """Enforce recorded provenance, not semantic novelty or automatic grading."""
     from adaptive_learning import fresh_question
     value=event['value'];prefix=(event['unit'],event['unit_sha256']);kind=event['type']
@@ -49,17 +49,33 @@ def replay(tasks,event,lessons):
             if value['level']!='solution' and value['level']!=expected:raise ValueError('Practice help must progress gradually')
             task['help'].append(dict(level=value['level'],content=value['content'],request=value['request'],revision=event['revision']))
             task['solution_shown']|=value['level']=='solution'
+            if help_index is not None:
+                key=prefix+(fresh_question(task['question']),)
+                help_index[key]=max(help_index.get(key,0),len(task['help']))
             return
         if fresh_question(value['question'])!=fresh_question(task['question']) or not set(value['criteria'])<=set(task['criteria']):
             raise ValueError('Assessment does not match its practice task')
         if value['stage']=='explained':raise ValueError('A practice task requires an actual attempt')
     if kind!='assessment' or value['stage']=='explained':return
     # Also prevent bypass by omitting task_id or relabelling an already shown task.
-    helped=[t for key,t in tasks.items() if key[:2]==prefix and t['help'] and fresh_question(t['question'])==fresh_question(value['question'])]
-    if helped and (value['stage'] in ('solved_independently','checked_later') or value['hints']<max(len(t['help']) for t in helped)):
+    question=fresh_question(value['question'])
+    help_count=(help_index.get(prefix+(question,),0) if help_index is not None else
+        max((len(t['help']) for key,t in tasks.items() if key[:2]==prefix and t['help'] and fresh_question(t['question'])==question),default=0))
+    if help_count and (value['stage'] in ('solved_independently','checked_later') or value['hints']<help_count):
         raise ValueError('Recorded help requires an assisted attempt; use a fresh task for independent evidence')
     if 'task_id' in value:
         tasks[prefix+(value['task_id'],)]['last_attempt']=dict(revision=event['revision'],**value)
+
+
+def validate_replay(tasks,event,lessons):
+    """Trial only the task replay can mutate; leave the shared projection intact."""
+    from copy import deepcopy
+    trial=dict(tasks)
+    value=event['value']
+    if event['type']=='practice' or (event['type']=='assessment' and 'task_id' in value):
+        key=(event['unit'],event['unit_sha256'],value.get('task_id'))
+        if key in trial:trial[key]=deepcopy(trial[key])
+    replay(trial,event,lessons)
 
 
 def view(tasks,unit,lesson_id=None):

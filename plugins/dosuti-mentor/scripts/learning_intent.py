@@ -300,11 +300,12 @@ def learning_progress(args, intent):
         journal=unit_learning.load(learner(args)/'unit-learning.json',compact=True,history_limit=100)
         result.update(unit_history=journal['_history'],unit_event_count=journal['revision'],
                       unit_history_truncated=journal['revision']>100)
-        states={}
+        states={};journals=unit_learning.journals_by_unit(journal)
         for name,unit in units.items():
-            view=unit_learning.view(args,unit,journal)
+            selected_journal=journals[name]
+            view=unit_learning.view(args,unit,selected_journal)
             from adaptive_learning import recommendations
-            adaptive=recommendations(unit,journal,course.now())
+            adaptive=recommendations(unit,selected_journal,course.now())
             current=not unit['stale'] and view['all_criteria_demonstrated'] and all(row['time_valid'] for row in adaptive['criteria'])
             states[name]=dict(studied=bool(view['attempt_count'] or view['explanation_count']),demonstrated=current,
                               criteria=view['criteria'],checkpoint=view['checkpoint'],adaptive=adaptive['criteria'])

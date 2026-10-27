@@ -7,6 +7,7 @@ import shutil,subprocess,uuid,zipfile
 from urllib.parse import urlsplit
 from source_integrity import file_hash
 from storage_paths import source_kind
+from material_import import importing, reserve, remove_owned
 
 MAX_BYTES=32*1024*1024
 
@@ -41,7 +42,7 @@ def text_content(path,media_type=''):
 
 
 def acquire(directory,source):
-    folder=Path(directory)/'materials'/uuid.uuid4().hex;folder.mkdir(parents=True)
+    folder=reserve(Path(directory)/'materials'/uuid.uuid4().hex,directory=True)
     try:
         remote=source_kind(source)=='remote'
         name=Path(urlsplit(source).path).name if remote else Path(source).name
@@ -62,7 +63,7 @@ def acquire(directory,source):
         checksum=file_hash(raw);raw.chmod(raw.stat().st_mode & ~0o222)
         return raw,dict(source=source,effective_url=effective,media_type=media,raw_file=str(raw.resolve()),sha256=checksum,size=raw.stat().st_size)
     except BaseException:
-        shutil.rmtree(folder,ignore_errors=True);raise
+        remove_owned(folder);raise
 
 
 def validate_archive(archive):
@@ -74,23 +75,21 @@ def validate_archive(archive):
             raise ValueError('Archive contains unsafe paths or symbolic links')
 
 
+@importing
 def attach_material(args):
     import course as c
     directory=c.lesson_path(args);remote=source_kind(args.source)=='remote'
     raw,origin=acquire(directory,args.source)
-    try:
-        target=raw
-        if args.kind=='homework':
-            value,method=text_content(raw,origin['media_type']);target=raw.parent/('extracted-'+uuid.uuid4().hex+'.txt');target.write_text(value,encoding='utf-8');origin['extraction']=method
-        elif not zipfile.is_zipfile(raw):
-            # Reject HTML error/login bodies presented as downloadable code.
-            if 'html' in origin['media_type'].lower() or raw.read_bytes()[:1024].lstrip().lower().startswith((b'<!doctype html',b'<html')):raise ValueError('Code URL returned HTML; provide a raw code file or ZIP')
-            text_content(raw,origin['media_type'])
-        clone=deepcopy(args);clone.source=str(target);clone.material_origin=origin
-        c.attach_local(clone)
-        if target!=raw:target.unlink(missing_ok=True)
-    except BaseException:
-        shutil.rmtree(raw.parent,ignore_errors=True);raise
+    target=raw
+    if args.kind=='homework':
+        value,method=text_content(raw,origin['media_type']);target=reserve(raw.parent/('extracted-'+uuid.uuid4().hex+'.txt'));target.write_text(value,encoding='utf-8');origin['extraction']=method
+    elif not zipfile.is_zipfile(raw):
+        # Reject HTML error/login bodies presented as downloadable code.
+        if 'html' in origin['media_type'].lower() or raw.read_bytes()[:1024].lstrip().lower().startswith((b'<!doctype html',b'<html')):raise ValueError('Code URL returned HTML; provide a raw code file or ZIP')
+        text_content(raw,origin['media_type'])
+    clone=deepcopy(args);clone.source=str(target);clone.material_origin=origin
+    c.attach_local(clone)
+    if target!=raw:target.unlink(missing_ok=True)
 
 
 def resource_revision(item):
@@ -120,6 +119,7 @@ def describe(resources):
     return result
 
 
+@importing
 def resource(args):
     import course as c
     directory=c.lesson_path(args);data=c.read(directory/'lesson.json')
@@ -129,37 +129,31 @@ def resource(args):
     if original is None:raise ValueError('Unknown resource ID')
     if original.get('kind')=='video':raise ValueError('Prepare video resources as videos; text extraction does not process video')
     item=deepcopy(original)
-    new_folder=None;new_text=None
-    try:
-        if args.action in ('fetch','extract'):
-            if not item.get('origin'):
-                raw,origin=acquire(directory,item['source']);new_folder=raw.parent;item.update(origin=origin,status='downloaded')
+    if args.action in ('fetch','extract'):
+        if not item.get('origin'):
+            raw,origin=acquire(directory,item['source']);item.update(origin=origin,status='downloaded')
+        else:
+            origin=item['origin'];raw=Path(origin['raw_file'])
+            if integrity(str(raw),origin['sha256'])!='verified':raise ValueError('Resource cache changed; attach a new trusted version')
+        if args.action=='extract':
+            if item.get('extracted_file'):
+                if integrity(item['extracted_file'],item['text_sha256'])!='verified':raise ValueError('Extracted text changed; attach a new trusted version')
             else:
-                origin=item['origin'];raw=Path(origin['raw_file'])
-                if integrity(str(raw),origin['sha256'])!='verified':raise ValueError('Resource cache changed; attach a new trusted version')
-            if args.action=='extract':
-                if item.get('extracted_file'):
-                    if integrity(item['extracted_file'],item['text_sha256'])!='verified':raise ValueError('Extracted text changed; attach a new trusted version')
-                else:
-                    value,method=text_content(raw,origin.get('media_type',''))
-                    target=raw.parent/('text-'+uuid.uuid4().hex+'.txt');new_text=target;target.write_text(value,encoding='utf-8');target.chmod(target.stat().st_mode & ~0o222)
-                    item.update(extracted_file=str(target.resolve()),text_sha256=file_hash(target),extraction=method,status='extracted_not_reviewed')
-                item['revision']=resource_revision(item)
-        elif args.action=='review':
-            if not item.get('extracted_file'):raise ValueError('Extract and read the resource text before review')
-            if args.expected_revision!=resource_revision(item):raise ValueError('Resource revision changed; read the current extracted text')
-            if not isinstance(args.notes,str) or not args.notes.strip() or len(args.notes)>4000:raise ValueError('Review requires notes within 4000 characters')
-            item.update(status='reviewed',review=dict(revision=args.expected_revision,notes=args.notes,updated=c.now(),kind='assistant_recorded_review'))
-        else:raise ValueError('Unknown resource action')
-        def update(latest):
-            current=next((i for i in latest['resources'].get('items',[]) if i['id']==args.resource_id),None)
-            if current!=original:raise ValueError('Resource changed concurrently; read its current state')
-            if integrity(item['origin']['raw_file'],item['origin']['sha256'])!='verified':raise ValueError('Resource source changed during operation')
-            if item.get('extracted_file') and integrity(item['extracted_file'],item['text_sha256'])!='verified':raise ValueError('Resource text changed during operation')
-            current.clear();current.update(item)
-        c.update_lesson(directory,update)
-    except BaseException:
-        if new_folder is not None:shutil.rmtree(new_folder,ignore_errors=True)
-        elif new_text is not None:new_text.unlink(missing_ok=True)
-        raise
+                value,method=text_content(raw,origin.get('media_type',''))
+                target=reserve(raw.parent/('text-'+uuid.uuid4().hex+'.txt'));target.write_text(value,encoding='utf-8');target.chmod(target.stat().st_mode & ~0o222)
+                item.update(extracted_file=str(target.resolve()),text_sha256=file_hash(target),extraction=method,status='extracted_not_reviewed')
+            item['revision']=resource_revision(item)
+    elif args.action=='review':
+        if not item.get('extracted_file'):raise ValueError('Extract and read the resource text before review')
+        if args.expected_revision!=resource_revision(item):raise ValueError('Resource revision changed; read the current extracted text')
+        if not isinstance(args.notes,str) or not args.notes.strip() or len(args.notes)>4000:raise ValueError('Review requires notes within 4000 characters')
+        item.update(status='reviewed',review=dict(revision=args.expected_revision,notes=args.notes,updated=c.now(),kind='assistant_recorded_review'))
+    else:raise ValueError('Unknown resource action')
+    def update(latest):
+        current=next((i for i in latest['resources'].get('items',[]) if i['id']==args.resource_id),None)
+        if current!=original:raise ValueError('Resource changed concurrently; read its current state')
+        if integrity(item['origin']['raw_file'],item['origin']['sha256'])!='verified':raise ValueError('Resource source changed during operation')
+        if item.get('extracted_file') and integrity(item['extracted_file'],item['text_sha256'])!='verified':raise ValueError('Resource text changed during operation')
+        current.clear();current.update(item)
+    c.update_lesson(directory,update)
     return describe(c.read(directory/'lesson.json')['resources'])

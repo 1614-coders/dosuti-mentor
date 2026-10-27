@@ -226,7 +226,7 @@ def _load(path,unit_id=None,compact=False,history_limit=0):
     from collections import deque
     if type(history_limit) is not int or not 0<=history_limit<=100:raise ValueError('history-limit must be 0..100')
     retained=[];latest={};baselines={};count=0;counts={};history=deque(maxlen=history_limit)
-    successful=deque(maxlen=history_limit);successful_count=0;lessons={};tasks={};unit_counts={};unit_history={}
+    successful=deque(maxlen=history_limit);successful_count=0;lessons={};tasks={};help_index={};unit_counts={};unit_history={}
     for i,event in enumerate(events,1):
         if (not isinstance(event,dict) or set(event)!={'revision','at','unit','unit_sha256','session','type','value'}
                 or type(event['revision']) is not int or event['revision']!=i):raise ValueError('Invalid unit learning history')
@@ -236,7 +236,7 @@ def _load(path,unit_id=None,compact=False,history_limit=0):
         validate(event['value'],event['type'])
         if not apply_lesson_state(lessons,event):raise ValueError('Duplicate lifecycle event in journal')
         from practice_support import replay
-        replay(tasks,event,lessons)
+        replay(tasks,event,lessons,help_index)
         if schema==LEGACY_SCHEMA and (event['type'] in ('practice','review_decision','lesson_context','lesson_state') or (event['type']=='checkpoint' and 'lesson_id' in event['value']) or (event['type']=='assessment' and set(event['value'])!={'stage','details','question','answer','hints','criteria'} ) or (event['type']=='assessment' and event['value']['stage']=='checked_later')):raise ValueError('New events require unit_learning_v2')
         from adaptive_learning import validate_recheck,validate_event_time
         if event['type']=='assessment' and event['value']['stage']=='checked_later':
@@ -296,6 +296,18 @@ def load(path,unit_id=None,compact=False,history_limit=0):
     else:
         for key in ('_history','_completed_tasks','_completed_task_count'):data.pop(key,None)
     return data
+
+
+def journals_by_unit(data):
+    """Group one validated journal for read-only projections; never cache across reads."""
+    from collections import defaultdict
+    grouped=defaultdict(lambda:dict(data,events=[],_practice_tasks={},_lesson_states={}))
+    for event in data['events']:grouped[event['unit']]['events'].append(event)
+    for key,task in data.get('_practice_tasks',{}).items():
+        grouped[key[0]]['_practice_tasks'][key]=task
+    for identity,state in data.get('_lesson_states',{}).items():
+        grouped[state['context']['unit']]['_lesson_states'][identity]=state
+    return grouped
 
 
 def view(args,unit,data,*,lesson_id=None):
@@ -448,11 +460,11 @@ def learn_unit(args):
                 validate_event_time(event)
                 from learning_segments import append
                 from copy import deepcopy
-                from practice_support import replay
+                from practice_support import validate_replay
                 if lesson_id is not None and 'task_id' in value:
                     task=journal.get('_practice_tasks',{}).get((args.unit_id,unit['content_sha256'],value['task_id']))
                     if task and task.get('lesson_id')!=lesson_id:raise ValueError('Practice task belongs to another lesson')
-                replay(deepcopy(journal.get('_practice_tasks',{})),event,journal.get('_lesson_states',{}))
+                validate_replay(journal.get('_practice_tasks',{}),event,journal.get('_lesson_states',{}))
                 trial=dict(journal.get('_lesson_states',{}))
                 if lesson_id in trial:trial[lesson_id]=deepcopy(trial[lesson_id])
                 if apply_lesson_state(trial,event):append(path,event,expected)

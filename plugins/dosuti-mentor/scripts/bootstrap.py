@@ -50,6 +50,12 @@ def verify(home, runner=subprocess.run):
     compatibility()
     home = validate(home)
     python = runtime_python(home)
+    verify_python(python, runner=runner)
+    return dict(home=str(home), python=str(python), verified=True)
+
+
+def verify_python(python, runner=subprocess.run):
+    """Check a newly prepared interpreter, including before its directory is published."""
     if not python.is_file():
         raise ValueError('Private Python is unavailable; complete technical setup before learning')
     code = '''import sys, subprocess
@@ -59,7 +65,6 @@ subprocess.run([imageio_ffmpeg.get_ffmpeg_exe(), '-version'], check=True,
                stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=15)
 '''
     runner([str(python), '-I', '-B', '-c', code], check=True, capture_output=True, timeout=60)
-    return dict(home=str(home), python=str(python), verified=True)
 
 
 def prepare(home, runner=subprocess.run):

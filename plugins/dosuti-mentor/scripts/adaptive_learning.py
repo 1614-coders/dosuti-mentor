@@ -47,12 +47,19 @@ def validate_event_time(event):
 
 
 def recommendations(unit,data,now):
-    current=[e for e in data['events'] if e['unit']==unit['id'] and e['unit_sha256']==unit['content_sha256']]
     if unit['stale']:return dict(valid=True,blocked=True,reason='review_sources',criteria=[],evidence_events={},next_actions=[],later_verified_criteria=[],policy=policy())
+    assessments={};decisions={};explained=False
+    for event in data['events']:
+        if event['unit']!=unit['id'] or event['unit_sha256']!=unit['content_sha256']:continue
+        kind=event['type']
+        if kind=='assessment':
+            explained|=event['value']['stage']=='explained'
+            for index in event['value']['criteria']:assessments[index]=event
+        elif kind=='review_decision':
+            for index in event['value']['criteria']:decisions[index]=event
     at=timestamp(now);rows=[];evidence={}
     for index,title in enumerate(unit['criteria'],1):
-        latest=next((e for e in reversed(current) if e['type']=='assessment' and index in e['value']['criteria']),None)
-        explained=any(e['type']=='assessment' and e['value']['stage']=='explained' for e in current)
+        latest=assessments.get(index)
         if latest:evidence[str(latest['revision'])]=deepcopy(latest)
         stage=latest['value']['stage'] if latest else 'not_assessed';due=None;future=False;time_valid=True
         if latest:
@@ -71,7 +78,7 @@ def recommendations(unit,data,now):
                 action,priority=('recheck_due',2) if at>=due else ('continue_or_wait',5)
             except (ValueError,OverflowError):action,priority='review_evidence_time',3
         else:action,priority=('check_understanding' if explained else 'initial_check'),4
-        decision=next((e for e in reversed(current) if e['type']=='review_decision' and index in e['value']['criteria']),None)
+        decision=decisions.get(index)
         suppressed=None
         if decision and (latest is None or decision['revision']>latest['revision']):
             choice=decision['value']['choice']
@@ -197,10 +204,9 @@ def _study_next(args):
     try:journal=unit_learning.load(folder/'unit-learning.json',compact=True,history_limit=100)
     except (ValueError,OSError) as error:return dict(valid=False,reason=str(error),recommendations=[],recovery='Preserve and repair learner journal before using recommendations')
     registry=study_units.load(root,include_history=False);units=study_units.checked_units(root,registry,include_contexts=False);now=course.now()
-    suggestions=[];blocked=[];continuations=[];by_unit={}
-    for event in journal['events']:by_unit.setdefault(event['unit'],[]).append(event)
+    suggestions=[];blocked=[];continuations=[];by_unit=unit_learning.journals_by_unit(journal)
     for unit in units.values():
-        selected_journal=dict(journal,events=by_unit.get(unit['id'],[]))
+        selected_journal=by_unit[unit['id']]
         result=recommendations(unit,selected_journal,now)
         if result['blocked']:blocked.append(dict(unit=unit['id'],reason='review_sources',details=unit['reasons']));continue
         view=unit_learning.view(args,unit,selected_journal)
