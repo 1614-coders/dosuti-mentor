@@ -223,14 +223,18 @@ class AtomicWrites(unittest.TestCase):
         for name,writer in [('course',course.save),('json',af.atomic_json)]:
             with self.subTest(writer=name):
                 writer(self.path,dict(writer='initial'))
-                barrier=threading.Barrier(2)
+                barrier=threading.Barrier(2);publication=threading.Lock();original_replace=Path.replace
+                def replace(path,target):
+                    # Windows readers need a closed handle before replacement.
+                    # Only coordinate handle lifetime; both writers still stage concurrently.
+                    with publication:return original_replace(path,target)
                 def save(role):
                     barrier.wait(timeout=5)
                     for n in range(20):writer(self.path,dict(writer=role,index=n,text='Текст\n'*500))
-                with ThreadPoolExecutor(2) as pool:
+                with patch.object(Path,'replace',replace),ThreadPoolExecutor(2) as pool:
                     jobs=[pool.submit(save,role) for role in ('a','b')]
                     while any(not job.done() for job in jobs):
-                        data=json.loads(self.path.read_bytes())
+                        with publication:data=json.loads(self.path.read_bytes())
                         self.assertIn(data['writer'],('initial','a','b'))
                     for job in jobs:job.result(timeout=5)
                 self.assertIn(json.loads(self.path.read_bytes())['writer'],('a','b'))
@@ -273,3 +277,26 @@ writer(Path(sys.argv[2]),dict(text='new complete data'))
                 writer(self.path,dict(text='retry succeeded'))
                 self.assertEqual(json.loads(self.path.read_bytes()),dict(text='retry succeeded'))
                 self.assertEqual(orphan.read_bytes(),raw)
+
+    def test_open_reader_sharing_denial_preserves_old_target_and_retry_succeeds(self):
+        # Pin the OS behavior separately: it also applies to the old Path.replace primitive.
+        old=b'{"previous":true}';probe=self.root/'replace-probe'
+        self.path.write_bytes(old);probe.write_bytes(b'probe')
+        with self.path.open('rb') as reader:
+            if os.name=='nt':
+                with self.assertRaises(PermissionError):probe.replace(self.path)
+            else:probe.replace(self.path)
+            self.assertEqual(reader.read(),old)
+        probe.unlink(missing_ok=True)
+        for name,writer in [('course',course.save),('json',af.atomic_json)]:
+            with self.subTest(writer=name):
+                self.path.write_bytes(old)
+                with self.path.open('rb') as reader:
+                    if os.name=='nt':
+                        with self.assertRaises(PermissionError):writer(self.path,dict(updated=True))
+                        self.assertEqual(self.path.read_bytes(),old)
+                    else:writer(self.path,dict(updated=True))
+                    self.assertEqual(reader.read(),old)
+                self.assertFalse(list(self.root.glob('*.tmp')))
+                writer(self.path,dict(retry=True))
+                self.assertEqual(json.loads(self.path.read_bytes()),dict(retry=True))
