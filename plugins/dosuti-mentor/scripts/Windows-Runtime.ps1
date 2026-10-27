@@ -11,6 +11,50 @@ function Assert-DoSutiPath([string]$Path) {
     }
 }
 
+function Invoke-DoSutiMutex([string]$HomePath, [string]$Resource, [scriptblock]$MutexAction) {
+    # A named OS mutex also protects the first marker, before any owned files exist.
+    $mutexKeyPath = [IO.Path]::GetFullPath($HomePath).TrimEnd([IO.Path]::DirectorySeparatorChar,[IO.Path]::AltDirectorySeparatorChar).ToUpperInvariant()
+    $hash = [Security.Cryptography.SHA256]::Create()
+    try { $key = [BitConverter]::ToString($hash.ComputeHash([Text.Encoding]::UTF8.GetBytes($mutexKeyPath))).Replace('-','') }
+    finally { $hash.Dispose() }
+    $mutex = [Threading.Mutex]::new($false, ('Global\DoSuti-' + $Resource + '-' + $key))
+    $held = $false
+    try {
+        try { $held = $mutex.WaitOne(30000) }
+        catch [Threading.AbandonedMutexException] { $held = $true } # Recheck disk state after a killed owner.
+        if (-not $held) { throw 'Another DoSuti installer is active; retry after it finishes.' }
+        & $MutexAction
+    } finally {
+        try { if ($held) { $mutex.ReleaseMutex() } }
+        finally { $mutex.Dispose() }
+    }
+}
+
+function Invoke-DoSutiRuntimeLock([string]$HomePath, [scriptblock]$Action) {
+    $path = [IO.Path]::GetFullPath($HomePath).TrimEnd([IO.Path]::DirectorySeparatorChar,[IO.Path]::AltDirectorySeparatorChar)
+    # Dynamic scope shares only this synchronous operation's already-held lock.
+    if ((Get-Variable DoSutiRuntimeLockHome -ValueOnly -ErrorAction SilentlyContinue) -eq $path) {
+        & $Action
+        return
+    }
+    Invoke-DoSutiMutex $path 'runtime' {
+        $lockPath = Join-Path $path '.heavy.lock'
+        Assert-DoSutiPath $lockPath
+        $lock = [IO.File]::Open($lockPath,[IO.FileMode]::OpenOrCreate,[IO.FileAccess]::ReadWrite,[IO.FileShare]::ReadWrite)
+        $held = $false
+        try {
+            if ($lock.Length -eq 0) { $lock.SetLength(1) }
+            try { Lock-DoSutiHeavyFile $lock; $held = $true }
+            catch { throw 'Another DoSuti worker is active; retry Python installation after processing finishes.' }
+            $DoSutiRuntimeLockHome = $path
+            & $Action
+        } finally {
+            try { if ($held) { Unlock-DoSutiHeavyFile $lock } }
+            finally { $lock.Dispose() }
+        }
+    }
+}
+
 function Initialize-DoSutiHome([string]$HomePath) {
     Assert-DoSutiPath $HomePath
     if (Test-Path -LiteralPath (Join-Path $HomePath '.cleanup-pending.json')) { throw 'A legacy cleanup marker was found. Preserve this folder and choose a new empty DoSuti data folder.' }
@@ -18,6 +62,9 @@ function Initialize-DoSutiHome([string]$HomePath) {
     if ($full -eq [IO.Path]::GetPathRoot($full).TrimEnd([IO.Path]::DirectorySeparatorChar) -or $full -eq $env:USERPROFILE) {
         throw 'Choose a dedicated DoSuti data folder.'
     }
+    return Invoke-DoSutiMutex $full 'home' {
+    # Repeat checks under the mutex; publish a complete marker without replacement.
+    if (Test-Path -LiteralPath (Join-Path $full '.cleanup-pending.json')) { throw 'A legacy cleanup marker was found; preserve this folder.' }
     $marker = Join-Path $full '.dosuti-home.json'
     Assert-DoSutiPath $marker
     if (Test-Path -LiteralPath $marker) {
@@ -28,7 +75,12 @@ function Initialize-DoSutiHome([string]$HomePath) {
             throw 'Existing folder is not managed; choose an empty folder.'
         }
         [IO.Directory]::CreateDirectory($full) | Out-Null
-        @{schema='dosuti_home_v1';id=[guid]::NewGuid().ToString('N')} | ConvertTo-Json | Set-Content -LiteralPath $marker -Encoding UTF8
+        $temporary = Join-Path $full ('.dosuti-home-' + [guid]::NewGuid().ToString('N') + '.tmp')
+        try {
+            $json = @{schema='dosuti_home_v1';id=[guid]::NewGuid().ToString('N')} | ConvertTo-Json
+            [IO.File]::WriteAllText($temporary, $json, [Text.UTF8Encoding]::new($false))
+            [IO.File]::Move($temporary, $marker)
+        } finally { if (Test-Path -LiteralPath $temporary) { Remove-Item -LiteralPath $temporary } }
     }
     foreach ($child in @('runtime','cache','temp')) {
         $path = Join-Path $full $child
@@ -36,6 +88,7 @@ function Initialize-DoSutiHome([string]$HomePath) {
         [IO.Directory]::CreateDirectory($path) | Out-Null
     }
     return $full
+    }
 }
 
 function ConvertTo-DoSutiArgument([string]$Value) {
@@ -160,11 +213,19 @@ function Get-DoSutiTar {
 }
 
 function Install-DoSutiPython([string]$HomePath, $Spec, [string]$TargetName = 'python') {
+    return Invoke-DoSutiRuntimeLock $HomePath {
     if ($TargetName -notmatch '^python(?:-candidate-[a-f0-9]{32})?$') { throw 'Invalid private Python target.' }
     $runtime = Join-Path $HomePath 'runtime'
     $target = Join-Path $runtime $TargetName
     $python = Join-Path $target 'python.exe'
-    if (Test-Path -LiteralPath $target) { throw 'Private Python is damaged or unverified; preserve runtime/python before repair.' }
+    Assert-DoSutiPath $target
+    if (Test-Path -LiteralPath $target) {
+        if ((Test-Path -LiteralPath $python) -and (Get-FileHash -LiteralPath $python -Algorithm SHA256).Hash -eq $Spec.python_exe_sha256) {
+            $checked = Test-DoSutiPython $python -HomePath $HomePath
+            if ($checked) { return $checked }
+        }
+        throw 'Private Python is damaged or unverified; preserve runtime/python before repair.'
+    }
     $cache = Join-Path $HomePath 'cache/python'
     Assert-DoSutiPath $cache
     [IO.Directory]::CreateDirectory($cache) | Out-Null
@@ -174,7 +235,7 @@ function Install-DoSutiPython([string]$HomePath, $Spec, [string]$TargetName = 'p
         Remove-Item -LiteralPath $archive
     }
     if (-not (Test-Path -LiteralPath $archive)) {
-        $part = $archive + '.part'
+        $part = $archive + '.' + [guid]::NewGuid().ToString('N') + '.part'
         Assert-DoSutiPath $part
         $previousTLS = [Net.ServicePointManager]::SecurityProtocol
         try {
@@ -189,6 +250,7 @@ function Install-DoSutiPython([string]$HomePath, $Spec, [string]$TargetName = 'p
     }
     $staging = Join-Path $runtime ('.python-staging-' + [guid]::NewGuid().ToString('N'))
     [IO.Directory]::CreateDirectory($staging) | Out-Null
+    $published = $false
     try {
         # Windows bsdtar can lose non-ANSI characters in argv, even with PS 7.
         # Unicode stays in CreateProcess's working directory; argv is relative ASCII.
@@ -207,18 +269,21 @@ function Install-DoSutiPython([string]$HomePath, $Spec, [string]$TargetName = 'p
         } finally { $process.Dispose() }
         $candidate = Join-Path $staging 'python/python.exe'
         if ((Get-FileHash -LiteralPath $candidate -Algorithm SHA256).Hash -ne $Spec.python_exe_sha256) { throw 'Python executable SHA256 mismatch.' }
-        Move-Item -LiteralPath (Join-Path $staging 'python') -Destination $target
+        [IO.Directory]::Move((Join-Path $staging 'python'), $target)
+        $published = $true
         $checked = Test-DoSutiPython $python -HomePath $HomePath
         if (-not $checked) { throw 'Private Python cannot create a usable environment.' }
         return $checked
     } catch {
-        # This target was created by this attempt; an existing target was refused above.
-        if (Test-Path -LiteralPath $target) { Remove-Item -LiteralPath $target -Recurse -Force }
+        # Only a successful no-replace rename establishes this attempt's ownership.
+        if ($published -and (Test-Path -LiteralPath $target)) { Remove-Item -LiteralPath $target -Recurse -Force }
         throw
     } finally { if (Test-Path -LiteralPath $staging) { Remove-Item -LiteralPath $staging -Recurse -Force } }
+    }
 }
 
 function Resolve-DoSutiPython([string]$HomePath, [string]$Explicit, $Spec, [switch]$Offline) {
+    return Invoke-DoSutiRuntimeLock $HomePath {
     $private = Join-Path $HomePath 'runtime/python/python.exe'
     $candidates = @()
     if ($Explicit) {
@@ -257,18 +322,26 @@ function Resolve-DoSutiPython([string]$HomePath, [string]$Explicit, $Spec, [swit
     $selected = Install-DoSutiPython $HomePath $Spec
     $selected | Add-Member -NotePropertyName owned -NotePropertyValue $true
     return $selected
+    }
 }
 
 function Lock-DoSutiHeavyFile($Stream) { $Stream.Lock(0,1) }
 function Unlock-DoSutiHeavyFile($Stream) { $Stream.Unlock(0,1) }
 
 function Repair-DoSutiPython([string]$HomePath, $Spec, [switch]$Offline) {
+    return Invoke-DoSutiRuntimeLock $HomePath {
     $marker=Join-Path $HomePath '.dosuti-home.json'
     Assert-DoSutiPath $marker
     $identity=Get-Content -LiteralPath $marker -Raw | ConvertFrom-Json
     if ($identity.schema -ne 'dosuti_home_v1' -or $identity.id -notmatch '^[a-f0-9]{32}$') { throw 'Python repair requires a managed home.' }
     $target = Join-Path $HomePath 'runtime/python'
     Assert-DoSutiPath $target
+    $python = Join-Path $target 'python.exe'
+    Assert-DoSutiPath $python
+    if ((Test-Path -LiteralPath $python) -and (Get-FileHash -LiteralPath $python -Algorithm SHA256).Hash -eq $Spec.python_exe_sha256) {
+        $checked = Test-DoSutiPython $python -HomePath $HomePath
+        if ($checked) { return $checked } # A competing repair may already have finished.
+    }
     if ($Offline) {
         $archive = Join-Path $HomePath ('cache/python/' + $Spec.sha256 + '.tar.gz')
         Assert-DoSutiPath $archive
@@ -276,19 +349,12 @@ function Repair-DoSutiPython([string]$HomePath, $Spec, [switch]$Offline) {
             throw 'Offline Python repair needs the verified cached archive; original Python preserved.'
         }
     }
-    $lockPath = Join-Path $HomePath '.heavy.lock'
-    Assert-DoSutiPath $lockPath
-    $lock = [IO.File]::Open($lockPath,[IO.FileMode]::OpenOrCreate,[IO.FileAccess]::ReadWrite,[IO.FileShare]::ReadWrite)
-    $locked = $false
     $backup = Join-Path $HomePath ('runtime/python-previous-' + [guid]::NewGuid().ToString('N'))
     $candidateName = 'python-candidate-' + [guid]::NewGuid().ToString('N')
     $candidate = Join-Path $HomePath ('runtime/' + $candidateName)
     $prepared = $false
     $moved = $false
     try {
-        if ($lock.Length -eq 0) { $lock.SetLength(1) }
-        try { Lock-DoSutiHeavyFile $lock; $locked=$true }
-        catch { throw 'Another DoSuti worker is active; retry Python repair after processing finishes.' }
         # Download, hash and probe the replacement while the previous tree stays put.
         $selected = Install-DoSutiPython $HomePath $Spec -TargetName $candidateName
         $prepared = $true
@@ -314,12 +380,8 @@ function Repair-DoSutiPython([string]$HomePath, $Spec, [switch]$Offline) {
         $selected | Add-Member -NotePropertyName recovery_backup -NotePropertyValue $backup
         return $selected
     } finally {
-        try {
-            if ($prepared -and (Test-Path -LiteralPath $candidate)) { Remove-Item -LiteralPath $candidate -Recurse -Force }
-        } finally {
-            try { if ($locked) { Unlock-DoSutiHeavyFile $lock } }
-            finally { $lock.Dispose() }
-        }
+        if ($prepared -and (Test-Path -LiteralPath $candidate)) { Remove-Item -LiteralPath $candidate -Recurse -Force }
         if ($moved) { Write-Host "Previous Python preserved at $backup" }
+    }
     }
 }

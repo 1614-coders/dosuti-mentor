@@ -52,6 +52,10 @@ function Get-FileHash {
    if($mode -eq 'winner_failure') {throw 'Fixture B failed before publishing its candidate'}
   }
  }
+ if($mode -eq 'interrupted' -and $LiteralPath -match '[\\/]\.python-staging-[^\\/]+[\\/]python[\\/]python\.exe$') {
+  Signal 'interrupt-ready'
+  Wait-Signal 'never-release'
+ }
  Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $LiteralPath -Algorithm $Algorithm
 }
 function Invoke-WebRequest {
@@ -87,6 +91,14 @@ function Set-Content {
 }
 $result=@{ok=$false;role=$role;error=$null;pid=$PID;powershell=$PSVersionTable.PSVersion.ToString()}
 try {
+ if($mode -in @('home','winner_failure','winner_success','download_failure')) {
+  Signal ('start-'+$role)
+  $other=if($role -eq 'a') {'b'} else {'a'}
+  Wait-Signal ('start-'+$other)
+  # Both processes are live, but A enters the critical operation first.
+  if($role -eq 'b' -and $mode -in @('winner_failure','winner_success')) {Wait-Signal 'ready-a'}
+  if($role -eq 'b' -and $mode -eq 'download_failure') {Wait-Signal 'part-a'}
+ }
  if($mode -in @('home','initialize')) {
   $null=Initialize-DoSutiHome $homePath
  } else {
@@ -222,7 +234,7 @@ class WindowsInstallRace(unittest.TestCase):
         self.initialize()
         results=self.f.run('winner_failure','a','b')
         self.assertTrue(results['a']['ok'],results)
-        # Continue to recovery even if this safety assertion exposes deletion.
+        # Preserve the original safety assertions even when the contender reuses the winner.
         with self.subTest(phase='winner must survive'):
             self.assert_runtime()
             self.assertEqual((self.f.home/'runtime/python/winner-a.txt').read_text(),'preserve winner')
@@ -234,6 +246,7 @@ class WindowsInstallRace(unittest.TestCase):
         self.initialize()
         results=self.f.run('winner_success','a','b')
         self.assertTrue(results['a']['ok'],results)
+        self.assertTrue(results['b']['ok'],results)
         self.assert_runtime()
         self.assertEqual((self.f.home/'runtime/python/winner-a.txt').read_text(),'preserve winner')
         self.assertFalse((self.f.home/'runtime/python/python').exists(),'Second checkout was nested inside the first')

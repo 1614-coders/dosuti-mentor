@@ -352,3 +352,86 @@ try {Initialize-DoSutiHome $homePath;throw 'unexpected success'}
 catch {if($_.Exception.Message -notmatch 'legacy cleanup marker') {throw}}
 if(Test-Path -LiteralPath (Join-Path $homePath 'runtime')) {throw 'setup recreated files during cleanup'}
 """)
+
+    def test_private_install_reuses_verified_target_and_preserves_foreign_partial(self):
+        self.run_ps("""
+Initialize-DoSutiHome $homePath | Out-Null
+$target=Join-Path $homePath 'runtime/python';[IO.Directory]::CreateDirectory($target) | Out-Null
+$file=Join-Path $target 'python.exe';[IO.File]::WriteAllText($file,'verified fixture')
+$sha=(Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash
+function Test-DoSutiPython {param($Executable) [pscustomobject]@{executable=$Executable} }
+function Invoke-WebRequest {throw 'verified peer installation must be reused'}
+$r=Install-DoSutiPython $homePath ([pscustomobject]@{python_exe_sha256=$sha})
+if($r.executable -ne $file -or (Test-Path -LiteralPath (Join-Path $target 'python'))) {throw 'peer target was replaced or nested'}
+$cache=Join-Path $homePath 'cache/python';[IO.Directory]::CreateDirectory($cache) | Out-Null
+$foreign=Join-Path $cache 'foreign.part';[IO.File]::WriteAllText($foreign,'preserve foreign partial')
+$script:parts=@()
+function Invoke-WebRequest {param($Uri,$OutFile,[switch]$UseBasicParsing,$TimeoutSec)
+ $script:parts+=@($OutFile)
+ [IO.File]::WriteAllText($OutFile,'incomplete');throw [OperationCanceledException]::new('fixture cancelled')
+}
+Remove-Item -LiteralPath $target -Recurse -Force
+foreach($attempt in 1..2) {
+ try {Install-DoSutiPython $homePath ([pscustomobject]@{sha256=('0'*64)});throw 'unexpected success'}
+ catch {if($_.Exception.Message -notmatch 'fixture cancelled') {throw}}
+}
+if($script:parts.Count -ne 2 -or $script:parts[0] -eq $script:parts[1]) {throw 'attempts shared their partial path'}
+if((Get-Content -LiteralPath $foreign -Raw) -ne 'preserve foreign partial') {throw 'foreign partial was removed'}
+if(@(Get-ChildItem -LiteralPath $cache -Force).Count -ne 1) {throw 'cancelled download left its own partial'}
+""")
+
+    def test_failed_publication_never_deletes_an_unowned_target(self):
+        archive=self.base/'fixture.tar.gz';payload=b'verified fixture'
+        with tarfile.open(archive,'w:gz') as tar:
+            item=tarfile.TarInfo('python/python.exe');item.size=len(payload);tar.addfile(item,io.BytesIO(payload))
+        sha=hashlib.sha256(archive.read_bytes()).hexdigest()
+        self.run_ps("""
+Initialize-DoSutiHome $homePath | Out-Null
+$spec=[pscustomobject]@{sha256='ARCHIVE_SHA';python_exe_sha256='EXE_SHA'}
+$cache=Join-Path $homePath 'cache/python';[IO.Directory]::CreateDirectory($cache) | Out-Null
+Copy-Item -LiteralPath 'ARCHIVE_PATH' -Destination (Join-Path $cache ($spec.sha256+'.tar.gz'))
+function Get-FileHash {param($LiteralPath,$Algorithm)
+ if($LiteralPath -match '[.]python-staging-') {
+  $foreign=Join-Path $homePath 'runtime/python';[IO.Directory]::CreateDirectory($foreign) | Out-Null
+  [IO.File]::WriteAllText((Join-Path $foreign 'keep.txt'),'unowned target')
+ }
+ Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $LiteralPath -Algorithm $Algorithm
+}
+function Test-DoSutiPython {throw 'a failed publication must not launch Python'}
+$failed=$false
+try {Install-DoSutiPython $homePath $spec} catch {$failed=$true}
+if(-not $failed) {throw 'occupied target accepted'}
+if((Get-Content -LiteralPath (Join-Path $homePath 'runtime/python/keep.txt') -Raw) -ne 'unowned target') {throw 'unowned target removed'}
+if(Test-Path -LiteralPath (Join-Path $homePath 'runtime/python/python')) {throw 'candidate nested in unowned target'}
+if(@(Get-ChildItem -LiteralPath (Join-Path $homePath 'runtime') -Filter '.python-staging-*').Count) {throw 'failed attempt left staging'}
+""".replace('ARCHIVE_SHA',sha).replace('EXE_SHA',hashlib.sha256(payload).hexdigest()).replace('ARCHIVE_PATH',str(archive)))
+
+    @unittest.skipUnless(os.name=='nt','Killed-owner mutex and file-lock recovery requires Windows')
+    def test_killed_install_and_repair_release_locks_and_preserve_previous_files(self):
+        import time
+        from test_windows_install_race import RaceFixture
+        for repair in (False,True):
+            with self.subTest(repair=repair):
+                fixture=RaceFixture()
+                try:
+                    self.assertTrue(fixture.run('initialize','init')['init']['ok']);fixture.cache()
+                    if repair:
+                        old=fixture.home/'runtime/python';old.mkdir()
+                        (old/'python.exe').write_bytes(b'damaged fixture')
+                        (old/'keep.txt').write_text('old files')
+                    code=base64.b64encode(fixture.script('interrupted','killed').encode('utf-16-le')).decode('ascii')
+                    worker=subprocess.Popen([PWSH,'-NoLogo','-NoProfile','-NonInteractive','-EncodedCommand',code],
+                                            stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+                    fixture.processes.append(worker)
+                    deadline=time.monotonic()+15
+                    while not (fixture.control/'interrupt-ready').exists():
+                        self.assertIsNone(worker.poll(),'worker exited before controlled interruption')
+                        self.assertLess(time.monotonic(),deadline,'worker never reached candidate verification')
+                        time.sleep(0.02)
+                    worker.kill();worker.wait(timeout=5)
+                    if repair:self.assertEqual((old/'keep.txt').read_text(),'old files')
+                    result=fixture.run('retry','retry')['retry'];self.assertTrue(result['ok'],result)
+                    self.assertEqual((fixture.home/'runtime/python/python.exe').read_bytes(),b'Inert Python fixture. Do not execute.\n')
+                    if repair:self.assertEqual((Path(result['backup'])/'keep.txt').read_text(),'old files')
+                    self.assertFalse((fixture.home/'runtime/python/python').exists())
+                finally:fixture.close()
