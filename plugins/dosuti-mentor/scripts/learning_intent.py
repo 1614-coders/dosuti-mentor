@@ -425,7 +425,6 @@ def apply(state, event):
 
 
 def load(path):
-    from learning_tools import read_json
     from profile_storage import checked
     checked(path)
     from document_store import read

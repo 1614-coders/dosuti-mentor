@@ -17,7 +17,7 @@ class HTTPResume(unittest.TestCase):
             return subprocess.CompletedProcess(cmd,code,b'',b'')
         return run
     def call(self,status,body,headers,code=0):
-        with patch.object(h.subprocess,'run',self.response(status,body,headers,code)):h.download('https://example.org/video',self.target)
+        with patch.object(h,'preparation_run',self.response(status,body,headers,code)):h.download('https://example.org/video',self.target)
     def partial(self,etag='"v1"'):
         with self.assertRaises(RuntimeError):self.call(200,b'abc',{'Content-Length':'6','ETag':etag},18)
         self.assertFalse(self.target.exists())

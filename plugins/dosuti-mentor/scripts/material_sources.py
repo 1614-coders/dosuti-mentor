@@ -78,7 +78,8 @@ def validate_archive(archive):
 @importing
 def attach_material(args):
     import course as c
-    directory=c.lesson_path(args);remote=source_kind(args.source)=='remote'
+    directory=c.lesson_path(args)
+    source_kind(args.source)  # Validate before acquire creates temporary files.
     raw,origin=acquire(directory,args.source)
     target=raw
     if args.kind=='homework':

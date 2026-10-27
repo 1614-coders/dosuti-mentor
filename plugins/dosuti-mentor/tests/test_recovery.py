@@ -18,6 +18,8 @@ sys.path.insert(0, str(SCRIPTS))
 import course
 import download_model
 import processing_job
+import media_input
+import screen_evidence
 import processing_status
 import publication
 import test_integrity as fixtures
@@ -88,7 +90,7 @@ class JobRecovery(unittest.TestCase):
         return processing_job.run_job(self.args, self.ffmpeg)
 
     def interrupt(self, stage):
-        original = processing_job.subprocess.run
+        original = screen_evidence.preparation_run
         calls = {'audio': 0, 'frames': 0}
         failed = []
         def injected(command, **kw):
@@ -99,7 +101,7 @@ class JobRecovery(unittest.TestCase):
                 failed.append(True)
                 raise subprocess.CalledProcessError(9, command)
             return result
-        with patch.object(processing_job.subprocess, 'run', injected):
+        with patch.object(media_input, 'preparation_run', injected), patch.object(screen_evidence, 'preparation_run', injected):
             with self.assertRaises(subprocess.CalledProcessError):
                 self.run_job()
             state = json.loads((self.out / 'checkpoint.json').read_text())
@@ -150,7 +152,7 @@ class JobRecovery(unittest.TestCase):
                 self.run_job()
         self.assertFalse((self.out / 'transcript.json').exists())
         before = file_hash(self.out / 'audio.wav')
-        with patch.object(processing_job.subprocess, 'run', side_effect=AssertionError('FFmpeg should be cached')):
+        with patch.object(media_input, 'preparation_run', side_effect=AssertionError('FFmpeg should be cached')), patch.object(screen_evidence, 'preparation_run', side_effect=AssertionError('FFmpeg should be cached')):
             self.run_job()
         self.assertEqual(file_hash(self.out / 'audio.wav'), before)
 
@@ -193,7 +195,7 @@ class JobRecovery(unittest.TestCase):
         files = ['audio.wav', 'transcript.json', 'tutor_packet.json', 'progress.json']
         before = {name: file_hash(self.out / name) for name in files}
         self.args.cpu_mode = 'economy'
-        with patch.object(processing_job.subprocess, 'run', side_effect=AssertionError('No extraction')):
+        with patch.object(media_input, 'preparation_run', side_effect=AssertionError('No extraction')), patch.object(screen_evidence, 'preparation_run', side_effect=AssertionError('No extraction')):
             self.run_job()
         self.assertEqual(len(self.recognitions), 1)
         self.assertEqual(before, {name: file_hash(self.out / name) for name in files})
@@ -254,7 +256,7 @@ class JobRecovery(unittest.TestCase):
     def test_completed_repeat_does_no_extraction_or_asr(self):
         self.run_job()
         checksum = file_hash(self.out / 'tutor_packet.json')
-        with patch.object(processing_job.subprocess, 'run', side_effect=AssertionError('No extraction')):
+        with patch.object(media_input, 'preparation_run', side_effect=AssertionError('No extraction')), patch.object(screen_evidence, 'preparation_run', side_effect=AssertionError('No extraction')):
             self.run_job()
         self.assertEqual(len(self.loads), 1)
         self.assertEqual(len(self.recognitions), 1)
@@ -277,12 +279,13 @@ class JobRecovery(unittest.TestCase):
         self.assertNotEqual((self.out / 'audio.wav').read_bytes(), old[0].read_bytes())
 
     def test_changed_source_cannot_resume_unfinished_checkpoint(self):
-        original = processing_job.subprocess.run
+        import screen_evidence
+        original = screen_evidence.preparation_run
         def broken(command, **kw):
             if '-vf' in command:
                 raise subprocess.CalledProcessError(9, command)
             return original(command, **kw)
-        with patch.object(processing_job.subprocess, 'run', broken):
+        with patch.object(screen_evidence, 'preparation_run', broken):
             with self.assertRaises(subprocess.CalledProcessError):
                 self.run_job()
         self.video.write_bytes(self.b)
@@ -390,15 +393,15 @@ class JobRecovery(unittest.TestCase):
         script = '''import sys,time
 from pathlib import Path
 sys.path.insert(0,sys.argv[1])
-import lecture,subprocess
-original=subprocess.run
+import lecture,screen_evidence
+original=screen_evidence.preparation_run
 folder=Path(sys.argv[4])
 def paused(command,**kw):
  if '-vf' in command:
   (folder/'paused').write_text('ready')
   time.sleep(30)
  return original(command,**kw)
-subprocess.run=paused
+screen_evidence.preparation_run=paused
 sys.argv=['lecture.py',sys.argv[2],'--output',sys.argv[4],'--duration','2','--frame-every','0.5','--prepare-only','--resume']
 lecture.main()
 '''

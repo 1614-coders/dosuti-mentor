@@ -247,13 +247,13 @@ class SourceIntegrityRegression(unittest.TestCase):
         self.assertEqual(after['prepared_fragments'], before['prepared_fragments'])
 
     def test_video_change_during_frame_extraction_does_not_publish_image(self):
-        original = course.subprocess.run
+        original = course.preparation_run
         def mutate_after_frame(command, *args, **kw):
             result = original(command, *args, **kw)
             if '-frames:v' in command:
                 self.video.write_bytes(self.b)
             return result
-        with patch.object(course.subprocess, 'run', mutate_after_frame):
+        with patch.object(course, 'preparation_run', mutate_after_frame):
             with self.assertRaisesRegex(ValueError, 'Video changed during frame'):
                 self.capture(course.frame, time=1)
         self.assertFalse((self.lesson / 'evidence/frames/000000001000.jpg').exists())
@@ -337,7 +337,8 @@ class SourceIntegrityRegression(unittest.TestCase):
         self.assertEqual(self.state()['retired_fragments'][0]['folder'], 'old-unverified')
 
     def test_video_change_during_extraction_is_rejected(self):
-        original = lecture.subprocess.run
+        import media_input
+        original = media_input.preparation_run
         def mutate_after_audio(command, *args, **kw):
             result = original(command, *args, **kw)
             if '-ar' in command:
@@ -346,7 +347,7 @@ class SourceIntegrityRegression(unittest.TestCase):
         output = self.root / 'changed-during-extraction'
         argv = ['lecture.py', str(self.video), '--output', str(output), '--duration', '2',
                 '--frame-every', '0.5', '--prepare-only']
-        with patch.object(sys, 'argv', argv), patch.object(lecture.subprocess, 'run', mutate_after_audio):
+        with patch.object(sys, 'argv', argv), patch.object(media_input, 'preparation_run', mutate_after_audio):
             with self.assertRaises(SystemExit) as error:
                 lecture.main()
         self.assertEqual(error.exception.code, 2)

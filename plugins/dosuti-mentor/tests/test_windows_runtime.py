@@ -1,18 +1,18 @@
 """PowerShell behavior tests; Windows binaries are never executed on the Mac host."""
-import base64
 import hashlib
 import io
 import json
 import os
 from pathlib import Path
-import shutil
 import subprocess
 import sys
 import tarfile
 import tempfile
 import unittest
 
-PWSH = os.environ.get('DOSUTI_TEST_PWSH') or shutil.which('pwsh') or shutil.which('powershell')
+from powershell_test_support import literal, powershell_command, powershell_executable
+
+PWSH = powershell_executable()
 PACKAGE = Path(__file__).resolve().parents[3]
 
 
@@ -24,21 +24,18 @@ class WindowsRuntime(unittest.TestCase):
         self.home = self.base / 'данные с пробелами'
 
     def run_ps(self, body):
-        def literal(value): return "'" + str(value).replace("'", "''") + "'"
         code = ("$ErrorActionPreference='Stop'; . " + literal(PACKAGE / 'Windows-Runtime.ps1') +
                 '; $homePath=' + literal(self.home) + '; ' + body + '; exit 0')
         if os.name != 'nt':
             # Only the executable lookup is replaced; run the real extraction.
             code = code.replace('; $homePath=',
                 '; function Get-DoSutiTar { (Get-Command tar -CommandType Application | Select-Object -First 1).Source }; $homePath=', 1)
-        encoded = base64.b64encode(code.encode('utf-16-le')).decode()
-        result = subprocess.run([PWSH, '-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', encoded],
+        result = subprocess.run(powershell_command(PWSH,code),
                                 capture_output=True, text=True, timeout=40)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         return result.stdout
 
     def probe_command(self, code, milliseconds=5000):
-        literal=lambda s:"'"+str(s).replace("'","''")+"'"
         return (f'Test-DoSutiPython {literal(sys.executable)} @({literal("-c")},{literal(code)}) '
                 f'-HomePath $homePath -TimeoutMilliseconds {milliseconds}')
 
@@ -199,6 +196,42 @@ if(-not (Test-Path -LiteralPath $r.executable)) {throw 'missing interpreter'}
 $again=Resolve-DoSutiPython $homePath '' $spec
 if(-not $again.owned -or $again.executable -ne $r.executable) {throw 'private reuse failed'}
 """.replace('ARCHIVE_SHA', sha).replace('EXE_SHA', exe_sha).replace('ARCHIVE_PATH', str(archive)))
+
+    def test_extraction_timeout_and_interrupt_cleanup_and_offline_retry(self):
+        payload = b'not executed: verified fixture'
+        archive = self.base / 'cached.tar.gz'
+        with tarfile.open(archive, 'w:gz') as tar:
+            item = tarfile.TarInfo('python/python.exe'); item.size = len(payload)
+            tar.addfile(item, io.BytesIO(payload))
+        for interrupt in (False, True):
+            with self.subTest(interrupt=interrupt):
+                self.run_ps("""
+Initialize-DoSutiHome $homePath | Out-Null
+$spec=[pscustomobject]@{sha256='ARCHIVE_SHA';python_exe_sha256='EXE_SHA'}
+$cache=Join-Path $homePath 'cache/python';[IO.Directory]::CreateDirectory($cache) | Out-Null
+Copy-Item -LiteralPath 'ARCHIVE_PATH' -Destination (Join-Path $cache ($spec.sha256+'.tar.gz')) -Force
+function Invoke-WebRequest {throw 'offline cache must not download'}
+function Test-DoSutiPython {param($Executable,$LauncherArgs) [pscustomobject]@{executable=$Executable} }
+$script:waited=$false
+function Wait-DoSutiProbe {param($Process,$Milliseconds)
+ if($Milliseconds -ne 300000) {throw 'missing extraction deadline'}
+ $script:waited=$true
+ INJECT_WAIT
+}
+try {Install-DoSutiPython $homePath $spec;throw 'unexpected success'}
+catch {if($_.Exception.Message -notmatch 'timed out|fixture interrupted') {throw}}
+if(-not $script:waited) {throw 'bounded wait not used'}
+if(Test-Path -LiteralPath (Join-Path $homePath 'runtime/python')) {throw 'unverified target published'}
+if(@(Get-ChildItem -LiteralPath (Join-Path $homePath 'runtime') -Filter '.python-staging-*' -Force).Count) {throw 'staging remains after confirmed stop'}
+if(-not (Test-Path -LiteralPath (Join-Path $cache ($spec.sha256+'.tar.gz')))) {throw 'verified cache lost'}
+function Wait-DoSutiProbe {param($Process,$Milliseconds) $Process.WaitForExit($Milliseconds)}
+$r=Install-DoSutiPython $homePath $spec
+if(-not (Test-Path -LiteralPath $r.executable)) {throw 'offline retry failed'}
+Remove-Item -LiteralPath (Join-Path $homePath 'runtime/python') -Recurse -Force
+""".replace('ARCHIVE_SHA', hashlib.sha256(archive.read_bytes()).hexdigest())
+                    .replace('EXE_SHA', hashlib.sha256(payload).hexdigest())
+                    .replace('ARCHIVE_PATH', str(archive).replace("'", "''"))
+                    .replace('INJECT_WAIT', "throw [OperationCanceledException]::new('fixture interrupted')" if interrupt else 'return $false'))
 
     def test_extraction_failure_cleans_staging_and_preserves_cached_archive(self):
         archive = self.base / 'invalid.tar.gz'
@@ -419,8 +452,7 @@ if(@(Get-ChildItem -LiteralPath (Join-Path $homePath 'runtime') -Filter '.python
                         old=fixture.home/'runtime/python';old.mkdir()
                         (old/'python.exe').write_bytes(b'damaged fixture')
                         (old/'keep.txt').write_text('old files')
-                    code=base64.b64encode(fixture.script('interrupted','killed').encode('utf-16-le')).decode('ascii')
-                    worker=subprocess.Popen([PWSH,'-NoLogo','-NoProfile','-NonInteractive','-EncodedCommand',code],
+                    worker=subprocess.Popen(powershell_command(PWSH,fixture.script('interrupted','killed')),
                                             stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
                     fixture.processes.append(worker)
                     deadline=time.monotonic()+15

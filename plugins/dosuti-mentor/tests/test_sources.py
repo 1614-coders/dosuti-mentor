@@ -88,7 +88,7 @@ class SourceAdapters(unittest.TestCase):
                 report.write_text(json.dumps(str(final))+'\n')
                 return NS(returncode=0)
             return real_run(command, **kw)
-        with patch.object(video_sources.subprocess, 'run', fake):
+        with patch.object(video_sources, 'preparation_run', fake):
             path = self.acquire(url)
         self.assertEqual(path.read_bytes(), self.a)
         self.assertEqual(commands[0][-1], url)
@@ -199,19 +199,19 @@ class SourceAdapters(unittest.TestCase):
         self.assertEqual(len(self.calls),1)
 
     def test_site_failure_explains_local_file_fallback(self):
-        with patch.object(video_sources.subprocess, 'run', side_effect=subprocess.CalledProcessError(1,['yt-dlp'])):
+        with patch.object(video_sources, 'preparation_run', side_effect=subprocess.CalledProcessError(1,['yt-dlp'])):
             with self.assertRaisesRegex(ValueError, 'login.*local video'):
                 self.acquire('https://other.example/private')
 
     def test_playlist_is_rejected_before_downloading(self):
         result=NS(returncode=0,stdout=json.dumps(dict(_type='playlist',entries=[dict(id='1'),dict(id='2')])))
-        with patch.object(video_sources.subprocess,'run',return_value=result) as run:
+        with patch.object(video_sources,'preparation_run',return_value=result) as run:
             with self.assertRaisesRegex(ValueError,'not a playlist'):
                 self.acquire('https://other.example/list')
         self.assertEqual(run.call_count,1)
 
     def test_live_stream_is_rejected_before_downloading(self):
-        with patch.object(video_sources.subprocess,'run',return_value=NS(stdout='{"is_live":true}')) as run:
+        with patch.object(video_sources,'preparation_run',return_value=NS(stdout='{"is_live":true}')) as run:
             with self.assertRaisesRegex(ValueError,'live stream'):
                 self.acquire('https://other.example/live')
         self.assertEqual(run.call_count,1)

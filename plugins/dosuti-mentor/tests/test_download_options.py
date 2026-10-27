@@ -20,7 +20,7 @@ class DownloadOptions(unittest.TestCase):
                 self.assertIn('--progress',cmd);self.assertIn('--abort-on-unavailable-fragments',cmd)
                 p=folder/'lecture.mp4';p.write_bytes(b'fake');(folder/'completed.json').write_text(json.dumps(str(p)))
                 return NS(returncode=0)
-            with patch.object(v.subprocess,'run',side_effect=fake):self.assertEqual(v.fetch_site('https://example.org/watch',folder,8,240)[0],(folder/'lecture.mp4').resolve())
+            with patch.object(v,'preparation_run',side_effect=fake):self.assertEqual(v.fetch_site('https://example.org/watch',folder,8,240)[0],(folder/'lecture.mp4').resolve())
     def test_classification(self):
         for raw,category in [('Sign in to confirm you are not a bot','access_required'),('HTTP Error 429','access_required'),('Unable to resolve host','network'),('Unsupported URL','unsupported')]:
             self.assertEqual(v.download_failure(subprocess.CalledProcessError(1,['yt-dlp']),raw)[0],category)
@@ -32,10 +32,10 @@ class DownloadOptions(unittest.TestCase):
                 if '--dump-single-json' in cmd:return NS(stdout='{}')
                 kw['stderr'].write('ERROR: Sign in; private-token=secret');kw['stderr'].flush()
                 raise subprocess.CalledProcessError(1,cmd)
-            with patch.object(v.subprocess,'run',side_effect=fake),self.assertRaisesRegex(ValueError,'login'):v.fetch_site('https://example.org/watch',folder)
+            with patch.object(v,'preparation_run',side_effect=fake),self.assertRaisesRegex(ValueError,'login'):v.fetch_site('https://example.org/watch',folder)
             d=json.loads((folder.parent/'download-status.json').read_text());self.assertEqual(d['category'],'access_required');self.assertNotIn('secret',json.dumps(d))
     def test_timeout_status(self):
         with tempfile.TemporaryDirectory() as tmp:
             f=Path(tmp)/'staging';f.mkdir()
-            with patch.object(v.subprocess,'run',side_effect=subprocess.TimeoutExpired(['x'],120)),self.assertRaisesRegex(ValueError,'timed out'):v.fetch_site('https://example.org/watch',f)
+            with patch.object(v,'preparation_run',side_effect=subprocess.TimeoutExpired(['x'],120)),self.assertRaisesRegex(ValueError,'timed out'):v.fetch_site('https://example.org/watch',f)
             self.assertEqual(json.loads((f.parent/'download-status.json').read_text())['category'],'timeout')

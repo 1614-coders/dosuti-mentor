@@ -272,9 +272,9 @@ def frame(args):
     video, checksum = checked_video(directory, data)
     output = directory / 'evidence' / 'frames' / f'{round(args.time*1000):012d}.jpg'
     output.parent.mkdir(parents=True, exist_ok=True)
-    subprocess.run([imageio_ffmpeg.get_ffmpeg_exe(), '-hide_banner', '-loglevel', 'error',
+    preparation_run([imageio_ffmpeg.get_ffmpeg_exe(), '-hide_banner', '-loglevel', 'error',
                     '-y', '-ss', str(args.time), '-i', str(video), '-frames:v', '1',
-                    '-q:v', '2', str(output)], check=True)
+                    '-q:v', '2', str(output)], check=True, timeout=120)
     if file_hash(video) != checksum:
         output.unlink(missing_ok=True)
         raise ValueError('Video changed during frame extraction')
@@ -392,8 +392,8 @@ def attach_local(args):
             command = ['git', 'clone', '--depth', '1']
             if args.ref:
                 command += ['--branch', args.ref]
-            subprocess.run(command + ['--', args.source, str(target)], check=True)
-            commit = subprocess.check_output(['git', '-C', str(target), 'rev-parse', 'HEAD'], text=True).strip()
+            preparation_run(command + ['--', args.source, str(target)], check=True, timeout=600)
+            commit = preparation_run(['git', '-C', str(target), 'rev-parse', 'HEAD'], check=True, capture_output=True, text=True, timeout=30).stdout.strip()
             origin = {'url': args.source, 'commit': commit, 'ref': args.ref}
         else:
             source = Path(args.source).expanduser().resolve()

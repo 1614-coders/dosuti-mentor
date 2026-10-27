@@ -373,11 +373,30 @@ def topic_summary(unit,learning):
                 verification='recorded_evidence_not_mastery_or_automatic_completion')
 
 
+def _read_learning_input(path, kind, session, lesson_id):
+    """Normalize one input and validate its shape before acquiring write locks."""
+    from learning_tools import read_json
+    value=read_json(path)
+    if kind=='practice' and isinstance(value,dict) and value.get('action')=='task' and lesson_id is not None:
+        if value.get('lesson_id',lesson_id)!=lesson_id:raise ValueError('Conflicting lesson IDs')
+        value=dict(value,lesson_id=lesson_id)
+    if kind=='lesson_context':
+        validate_lesson_input(value)
+        if session is None:raise ValueError('New lesson requires --session ID')
+    else:
+        if kind=='lesson_state' or (kind=='checkpoint' and lesson_id is not None):
+            if 'lesson_id' in value and value['lesson_id']!=lesson_id:raise ValueError('Conflicting lesson IDs')
+            value=dict(value,lesson_id=lesson_id)
+        validate(value,kind)
+    if kind in ('checkpoint','lesson_state','practice') and session is None:raise ValueError('Checkpoint/lifecycle/practice requires --session ID')
+    return value
+
+
 @reuse_reads
 def learn_unit(args):
     import course
     import study_units
-    from learning_tools import learner,read_json,preferences
+    from learning_tools import learner,preferences
     from learning_intent import view as intent_view
     root=course.root(args);folder=learner(args)
     if root.is_relative_to(Path(__file__).resolve().parents[1]):raise ValueError('Unit learning must stay outside plugin')
@@ -403,22 +422,7 @@ def learn_unit(args):
     incoming=assessment or checkpoint or decision or context_file or state_file or practice_file
     if incoming:
         kind='assessment' if assessment else ('checkpoint' if checkpoint else 'review_decision' if decision else 'lesson_context' if context_file else 'lesson_state' if state_file else 'practice')
-        value=read_json(incoming)
-        if kind=='practice' and isinstance(value,dict) and value.get('action')=='task' and lesson_id is not None:
-            if value.get('lesson_id',lesson_id)!=lesson_id:raise ValueError('Conflicting lesson IDs')
-            value=dict(value,lesson_id=lesson_id)
-        if kind=='lesson_context':
-            validate_lesson_input(value)
-            if session is None:raise ValueError('New lesson requires --session ID')
-        else:
-            if kind=='lesson_state':
-                if 'lesson_id' in value and value['lesson_id']!=lesson_id:raise ValueError('Conflicting lesson IDs')
-                value=dict(value,lesson_id=lesson_id)
-            if kind=='checkpoint' and lesson_id is not None:
-                if 'lesson_id' in value and value['lesson_id']!=lesson_id:raise ValueError('Conflicting lesson IDs')
-                value=dict(value,lesson_id=lesson_id)
-            validate(value,kind)
-        if kind in ('checkpoint','lesson_state','practice') and session is None:raise ValueError('Checkpoint/lifecycle/practice requires --session ID')
+        value=_read_learning_input(incoming,kind,session,lesson_id)
         expected=getattr(args,'expected_revision',None)
         if type(expected) is not int or expected<0:raise ValueError('Unit learning write requires --expected-revision')
         from source_integrity import digest

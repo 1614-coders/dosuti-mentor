@@ -60,8 +60,10 @@ jobs:
       - name: Run supported Windows checks
         working-directory: plugins/dosuti-mentor/tests
         run: |
+          $ErrorActionPreference = 'Stop'
+          $env:DOSUTI_TEST_PWSH = (Get-Command pwsh -CommandType Application).Source
           Get-Command tar, tar.exe | Format-Table CommandType, Name, Source
-          python -B -m unittest -v test_windows_runtime test_windows_onboarding test_platform_diagnostics test_history_read_only test_runtime_repair test_python_probe test_import_rollback test_practice_reuse test_operation_reuse test_adaptive_practice test_learning_progress test_research_rollback test_history_cli_boundary test_write_preflight test_atomic_writes
+          python -B -m unittest -v windows_test_suite
       - name: Reproduce first-install races on PowerShell 7
         if: ${{ !cancelled() }}
         working-directory: plugins/dosuti-mentor/tests
@@ -88,4 +90,4 @@ jobs:
           DOSUTI_TEST_PWSH: C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe
         run: |
           Get-Command Get-FileHash | Format-Table Name, Source
-          python -B -m unittest -v test_windows_runtime test_windows_onboarding test_platform_diagnostics test_history_read_only test_runtime_repair test_python_probe test_import_rollback test_practice_reuse test_operation_reuse test_adaptive_practice test_learning_progress test_research_rollback test_history_cli_boundary test_write_preflight test_atomic_writes
+          python -B -m unittest -v windows_test_suite

@@ -3,7 +3,6 @@
 These safety assertions may FAIL on the unfixed installer. A skip is not evidence
 that a race is absent. Archives contain inert bytes, never an executable Python.
 """
-import base64
 import hashlib
 import io
 import json
@@ -16,7 +15,9 @@ import tempfile
 import time
 import unittest
 
-PWSH = os.environ.get('DOSUTI_TEST_PWSH') or shutil.which('pwsh') or shutil.which('powershell')
+from powershell_test_support import literal, powershell_command, powershell_executable
+
+PWSH = powershell_executable()
 LIBRARY = Path(__file__).resolve().parents[1] / 'scripts/Windows-Runtime.ps1'
 PAYLOAD = b'Inert Python fixture. Do not execute.\n'
 
@@ -123,48 +124,55 @@ class RaceFixture:
     def __init__(self):
         import tarfile
         self.base=Path(tempfile.mkdtemp(prefix='dosuti-install-race-')).resolve()
-        self.home=self.base/'данные с пробелами'
-        self.control=self.base/'control';self.control.mkdir()
-        self.archive=self.base/'fixture.tar.gz'
-        with tarfile.open(self.archive,'w:gz') as archive:
-            for name,raw in (('python/python.exe',PAYLOAD),('python/stdlib.txt',b'fixture standard library')):
-                item=tarfile.TarInfo(name);item.size=len(raw);archive.addfile(item,io.BytesIO(raw))
-        self.spec=dict(url='https://example.invalid/never-contacted',
-            sha256=hashlib.sha256(self.archive.read_bytes()).hexdigest(),
-            python_exe_sha256=hashlib.sha256(PAYLOAD).hexdigest())
-        self.spec_path=self.base/'spec.json';self.spec_path.write_text(json.dumps(self.spec),encoding='utf-8')
-        self.processes=[];self.handles=[];self.preserve=False
-        self.case='fixture'
+        try:
+            self.home=self.base/'данные с пробелами'
+            self.control=self.base/'control';self.control.mkdir()
+            self.archive=self.base/'fixture.tar.gz'
+            with tarfile.open(self.archive,'w:gz') as archive:
+                for name,raw in (('python/python.exe',PAYLOAD),('python/stdlib.txt',b'fixture standard library')):
+                    item=tarfile.TarInfo(name);item.size=len(raw);archive.addfile(item,io.BytesIO(raw))
+            self.spec=dict(url='https://example.invalid/never-contacted',
+                sha256=hashlib.sha256(self.archive.read_bytes()).hexdigest(),
+                python_exe_sha256=hashlib.sha256(PAYLOAD).hexdigest())
+            self.spec_path=self.base/'spec.json';self.spec_path.write_text(json.dumps(self.spec),encoding='utf-8')
+            self.processes=[];self.handles=[];self.preserve=False
+            self.case='fixture'
+        except BaseException:
+            shutil.rmtree(self.base)
+            raise
 
     def script(self,mode,role):
         values=dict(LIBRARY=LIBRARY,HOME=self.home,CONTROL=self.control,ARCHIVE=self.archive,
                     SPEC=self.spec_path,MODE=mode,ROLE=role)
         code=WORKER
-        for key,value in values.items():code=code.replace('@@'+key+'@@',"'"+str(value).replace("'","''")+"'")
+        for key,value in values.items():code=code.replace('@@'+key+'@@',literal(value))
         return code
 
     def close(self):
-        try:
-            for process in self.processes:
+        failures=[]
+        for process in self.processes:
+            try:
                 if process.poll() is None:
                     killer=Path(os.environ['SystemRoot'])/'System32/taskkill.exe'
                     subprocess.run([str(killer),'/PID',str(process.pid),'/T','/F'],
                                    capture_output=True,timeout=10)
                     process.wait(timeout=5)
-        except BaseException:
-            self.preserve=True
-            raise RuntimeError('Could not confirm worker termination; fixture preserved at '+str(self.base))
-        finally:
-            for stream in self.handles:stream.close()
-            if not self.preserve:shutil.rmtree(self.base)
+            except BaseException as error:
+                failures.append(error)
+        for stream in self.handles:
+            try:stream.close()
+            except BaseException as error:failures.append(error)
+        if failures:self.preserve=True
+        if not self.preserve:shutil.rmtree(self.base)
+        if failures:
+            raise RuntimeError('Could not complete worker/output cleanup; fixture preserved at '+str(self.base)) from failures[0]
 
     def run(self,mode,*roles):
         jobs=[]
         for role in roles:
-            encoded=base64.b64encode(self.script(mode,role).encode('utf-16-le')).decode('ascii')
-            output=(self.control/(role+'.stdout')).open('wb');errors=(self.control/(role+'.stderr')).open('wb')
-            self.handles.extend((output,errors))
-            process=subprocess.Popen([PWSH,'-NoLogo','-NoProfile','-NonInteractive','-EncodedCommand',encoded],
+            output=(self.control/(role+'.stdout')).open('wb');self.handles.append(output)
+            errors=(self.control/(role+'.stderr')).open('wb');self.handles.append(errors)
+            process=subprocess.Popen(powershell_command(PWSH,self.script(mode,role)),
                                      cwd=self.base,stdout=output,stderr=errors)
             self.processes.append(process);jobs.append((role,process))
         deadline=time.monotonic()+50

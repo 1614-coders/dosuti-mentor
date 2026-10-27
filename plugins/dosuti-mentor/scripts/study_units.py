@@ -93,7 +93,6 @@ def validate_history(event):
 
 @cached
 def load(root,include_history=True):
-    from learning_tools import read_json
     path=root/'study-units.json';checked(path)
     from document_store import read
     history_count=0

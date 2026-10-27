@@ -7,6 +7,7 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
+from preparation_control import run as preparation_run
 import uuid
 from atomic_files import atomic_json
 from source_integrity import file_hash, safe_asset, source_matches
@@ -26,12 +27,12 @@ def extract_frames(video, folder, start, duration, sample_every, ffmpeg, threads
     folder.mkdir(parents=True,exist_ok=True)
     # Limit the input, so a filter with no later output does not decode the rest of a long lecture.
     selection=f"select='lt(t,{duration})*(isnan(prev_selected_t)+gte(t-prev_selected_t,{sample_every}))',showinfo"
-    result=subprocess.run([ffmpeg,'-hide_banner','-loglevel','info','-y',
+    result=preparation_run([ffmpeg,'-hide_banner','-loglevel','info','-y',
         *(['-threads', str(threads), '-filter_threads', str(threads)] if threads else []),
         '-ss',str(start),'-t',str(duration),'-i',str(video),'-an','-vf',selection,
         '-fps_mode','vfr','-q:v','2',
         *(['-threads', str(threads)] if threads else []),str(folder/'%05d.jpg')],
-        check=False,capture_output=True,text=True)
+        check=False,capture_output=True,text=True,process_group=False, timeout=max(120, duration * 10))
     stamps=[(int(n),float(t)) for n,t in re.findall(r'n:\s*(\d+)\s+pts:.*?pts_time:\s*([\d.eE+-]+)',result.stderr)]
     files=sorted(folder.glob('*.jpg'))
     if not files:

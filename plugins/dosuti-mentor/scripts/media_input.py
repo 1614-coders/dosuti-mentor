@@ -2,6 +2,7 @@
 import math
 from pathlib import Path
 import subprocess
+from preparation_control import run as preparation_run
 import wave
 import numpy as np
 
@@ -93,13 +94,13 @@ def extract_audio(video, folder, start, duration, media, ffmpeg, audio_track=Non
             target = folder / f'audio-track-{track["index"]}.staging.wav'
             paths.append(target)
             # first_pts=0 pads a late first packet after input seeking; apad keeps the visual tail.
-            result = subprocess.run([ffmpeg, '-hide_banner', '-loglevel', 'error', '-xerror', '-y',
+            result = preparation_run([ffmpeg, '-hide_banner', '-loglevel', 'error', '-xerror', '-y',
                 *(['-threads', str(threads), '-filter_threads', str(threads)] if threads else []),
                 '-ss', str(start), '-i', str(video), '-map', f'0:{track["index"]}', '-vn',
                 '-af', f'aresample=16000:async=1:first_pts=0,apad=whole_dur={duration}',
                 '-ar', '16000', '-t', str(duration), '-c:a', 'pcm_s16le',
                 *(['-threads', str(threads)] if threads else []), str(target)],
-                check=True, capture_output=True, text=True)
+                check=True, capture_output=True, text=True, process_group=False, timeout=max(120, duration * 10))
             errors = decoding_errors(result.stderr)
             if errors:
                 raise ValueError('Damaged audio: ' + '; '.join(errors)[:600])

@@ -117,7 +117,7 @@ function Stop-DoSutiProbe($Process) {
         $null = $killer.StandardOutput.ReadToEndAsync()
         $null = $killer.StandardError.ReadToEndAsync()
         if (-not $killer.WaitForExit(10000)) {
-            $killer.Kill(); $killer.WaitForExit()
+            $killer.Kill(); $null = $killer.WaitForExit(5000)
             throw 'Python probe tree termination timed out; preserve its managed temporary folder.'
         }
         if ($killer.ExitCode -ne 0 -or -not $Process.WaitForExit(5000)) {
@@ -251,6 +251,7 @@ function Install-DoSutiPython([string]$HomePath, $Spec, [string]$TargetName = 'p
     $staging = Join-Path $runtime ('.python-staging-' + [guid]::NewGuid().ToString('N'))
     [IO.Directory]::CreateDirectory($staging) | Out-Null
     $published = $false
+    $extractionStopped = $true
     try {
         # Windows bsdtar can lose non-ANSI characters in argv, even with PS 7.
         # Unicode stays in CreateProcess's working directory; argv is relative ASCII.
@@ -263,10 +264,14 @@ function Install-DoSutiPython([string]$HomePath, $Spec, [string]$TargetName = 'p
         $process = New-Object Diagnostics.Process
         $process.StartInfo = $info
         try {
+            $extractionStopped = $false
             $process.Start() | Out-Null
-            $process.WaitForExit()
+            if (-not (Wait-DoSutiProbe $process 300000)) { throw 'Python archive extraction timed out.' }
             if ($process.ExitCode -ne 0) { throw 'Cannot extract Python; Windows tar.exe failed.' }
-        } finally { $process.Dispose() }
+        } finally {
+            try { Stop-DoSutiProbe $process; $extractionStopped = $true }
+            finally { $process.Dispose() }
+        }
         $candidate = Join-Path $staging 'python/python.exe'
         if ((Get-FileHash -LiteralPath $candidate -Algorithm SHA256).Hash -ne $Spec.python_exe_sha256) { throw 'Python executable SHA256 mismatch.' }
         [IO.Directory]::Move((Join-Path $staging 'python'), $target)
@@ -278,7 +283,7 @@ function Install-DoSutiPython([string]$HomePath, $Spec, [string]$TargetName = 'p
         # Only a successful no-replace rename establishes this attempt's ownership.
         if ($published -and (Test-Path -LiteralPath $target)) { Remove-Item -LiteralPath $target -Recurse -Force }
         throw
-    } finally { if (Test-Path -LiteralPath $staging) { Remove-Item -LiteralPath $staging -Recurse -Force } }
+    } finally { if ($extractionStopped -and (Test-Path -LiteralPath $staging)) { Remove-Item -LiteralPath $staging -Recurse -Force } }
     }
 }
 

@@ -175,7 +175,7 @@ class ImportRollback(unittest.TestCase):
             target=Path(command[-1]);target.mkdir(parents=True,exist_ok=True)
             (target/'partial').write_text('incomplete clone')
             raise subprocess.CalledProcessError(1,command)
-        with patch.object(course.subprocess,'run',side_effect=fail):
+        with patch.object(course,'preparation_run',side_effect=fail):
             with self.assertRaises(subprocess.CalledProcessError):self.attach('code','https://github.com/example/repo')
         self.assertEqual(self.files(),before)
         self.assertFalse(list((self.directory/'code').iterdir()))

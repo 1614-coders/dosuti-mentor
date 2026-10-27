@@ -104,7 +104,7 @@ class ScreenEvidence(unittest.TestCase):
 
     def test_repeat_scan_reuses_verified_files_without_ffmpeg(self):
         first=self.scan()
-        with patch.object(screens.subprocess,'run',side_effect=AssertionError('FFmpeg called')):
+        with patch.object(screens,'preparation_run',side_effect=AssertionError('FFmpeg called')):
             self.assertEqual(self.scan(),first)
 
     def test_parallel_scans_publish_once(self):
@@ -114,7 +114,7 @@ class ScreenEvidence(unittest.TestCase):
         self.assertEqual(folders[0],folders[1]);self.assertEqual(extract.call_count,1)
 
     def test_failed_extraction_leaves_no_published_scan(self):
-        with patch.object(screens.subprocess,'run',side_effect=subprocess.CalledProcessError(1,['ffmpeg'])):
+        with patch.object(screens,'preparation_run',side_effect=subprocess.CalledProcessError(1,['ffmpeg'])):
             with self.assertRaises(subprocess.CalledProcessError):self.scan()
         self.assertEqual(list((self.root/'scans').glob('scan-*')),[])
         self.assertEqual(list((self.root/'scans').glob('.pending-*')),[])

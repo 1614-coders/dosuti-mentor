@@ -12,7 +12,9 @@ import test_unit_learning
 import course
 
 ROOT=Path(__file__).resolve().parents[3]
-PWSH=os.environ.get('DOSUTI_TEST_PWSH') or shutil.which('pwsh') or shutil.which('powershell')
+from powershell_test_support import literal, powershell_command, powershell_executable
+
+PWSH=powershell_executable()
 ANSWERS=dict(outcome=['profession'],subject='Java backend',self_assessment='basic_experience',
     learning_format='step_by_step',assistant_role='mentor',check_frequency='each_block',
     explanation_detail='balanced',constraints=dict(selected=['study_time'],details='3–5 часов в неделю'))
@@ -44,13 +46,12 @@ function Invoke-QAPython {
  $global:LASTEXITCODE=0
 }
 ''')
-            literal=lambda p:"'"+str(p).replace("'","''")+"'"
             code="[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false); $env:PROCESSOR_ARCHITECTURE='AMD64'; & "+literal(scripts/'Install-DoSuti.ps1')+" -HomePath "+literal(root/'данные с пробелами')+" -Python fixture-python -Offline"
-            result=subprocess.run([PWSH,'-NoProfile','-NonInteractive','-Command',code],capture_output=True,encoding='utf-8',timeout=20)
+            result=subprocess.run(powershell_command(PWSH,code),capture_output=True,encoding='utf-8',timeout=20)
             self.assertEqual(result.returncode,0,result.stderr)
             args=json.loads(result.stdout.strip());self.assertEqual(args[-2:],['--home',str(root/'данные с пробелами')])
             self.assertEqual(args[0],'-B')
-            invalid=subprocess.run([PWSH,'-NoProfile','-NonInteractive','-Command',code+' -Check'],
+            invalid=subprocess.run(powershell_command(PWSH,code+' -Check'),
                                    capture_output=True,encoding='utf-8',timeout=20)
             self.assertNotEqual(invalid.returncode,0,'Unknown installer flag must fail before setup')
 
