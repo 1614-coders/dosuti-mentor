@@ -1,6 +1,6 @@
 """Local course storage and processing. No paid APIs and no automatic teaching."""
 import argparse
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 import difflib
 from datetime import datetime, timezone
 import hashlib
@@ -235,7 +235,7 @@ def read_progress(args):
 
 def bind(args):
     lesson_path(args)
-    with db(args) as connection:
+    with closing(db(args)) as connection, connection:
         connection.execute('INSERT INTO bindings VALUES (?, ?) ON CONFLICT(chat) DO UPDATE SET lesson=excluded.lesson',
                            (args.chat, args.lesson))
     print('Chat bound to course/profile; progress is shared with other bindings')
@@ -679,7 +679,7 @@ def progress(args):
                 raise ValueError('Homework changed; read the current task before saving assessment')
             if homework_integrity(homework) != 'verified':
                 raise ValueError('Homework content changed or is unavailable; attach the trusted task and review again')
-        with db(args) as connection:
+        with closing(db(args)) as connection, connection:
             previous = connection.execute(
                 'SELECT stage,homework_revision FROM progress WHERE lesson=? AND topic=?',
                 (args.lesson, args.topic)).fetchone()

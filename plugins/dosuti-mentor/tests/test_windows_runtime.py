@@ -59,6 +59,14 @@ foreach($attempt in 1..2) {
 }
 """.replace('SUCCESS',success).replace('FAILURE',failure))
 
+    def test_probe_start_failure_never_attempts_process_termination(self):
+        self.run_ps("""
+Initialize-DoSutiHome $homePath | Out-Null
+function Stop-DoSutiProbe {throw 'An unstarted process must not be terminated'}
+if(Test-DoSutiPython (Join-Path $homePath 'missing-python.exe') -HomePath $homePath) {throw 'Missing executable accepted'}
+if(@(Get-ChildItem -LiteralPath (Join-Path $homePath 'temp') -Force).Count) {throw 'Start failure left temporary files'}
+""")
+
     def test_probe_cancellation_stops_process_before_cleanup(self):
         stop=''
         if os.name != 'nt':

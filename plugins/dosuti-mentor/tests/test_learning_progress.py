@@ -103,7 +103,7 @@ class LearningProgress(unittest.TestCase):
     def test_old_sqlite_columns_read_without_schema_migration(self):
         path=self.f.f.f.path/'learners/default/progress.sqlite3'
         path.parent.mkdir(parents=True,exist_ok=True)
-        with sqlite3.connect(path) as connection:
+        with contextlib.closing(sqlite3.connect(path)) as connection, connection:
             connection.execute('CREATE TABLE progress (lesson TEXT,topic TEXT,stage TEXT,details TEXT,updated TEXT)')
             connection.execute("INSERT INTO progress VALUES ('lesson-01','Old maps','explained','Old explanation','2026-01-01')")
         before=self.files()
@@ -165,7 +165,7 @@ class LearningProgress(unittest.TestCase):
     def test_wal_database_is_preserved_and_reported_without_writing_shared_memory(self):
         self.legacy()
         path=self.f.f.f.path/'learners/default/progress.sqlite3'
-        with sqlite3.connect(path) as connection:
+        with contextlib.closing(sqlite3.connect(path)) as connection, connection:
             connection.execute('PRAGMA journal_mode=WAL')
         before=self.files()
         value=self.read()
@@ -221,7 +221,7 @@ class LearningProgress(unittest.TestCase):
                     if unit_checkpoint:
                         fixture.f.save(dict(recap='Unit',next_step='Practice',pending_question=None),checkpoint=True,session='a')
                     if wal:
-                        with sqlite3.connect(fixture.f.f.f.path/'learners/default/progress.sqlite3') as connection:
+                        with contextlib.closing(sqlite3.connect(fixture.f.f.f.path/'learners/default/progress.sqlite3')) as connection, connection:
                             connection.execute('PRAGMA journal_mode=WAL')
                     before=fixture.files()
                     value=fixture.read(session='b')
@@ -249,7 +249,7 @@ class LearningProgress(unittest.TestCase):
         self.assertIsNone(value['stopped_at'])
         self.assertEqual(self.files(),before)
 
-        with sqlite3.connect(self.f.path.parent/'progress.sqlite3') as connection:
+        with contextlib.closing(sqlite3.connect(self.f.path.parent/'progress.sqlite3')) as connection, connection:
             connection.execute('PRAGMA journal_mode=WAL')
         before=self.files();value=self.read(session='b')
         self.assertFalse(value['valid'])

@@ -99,6 +99,7 @@ function Test-DoSutiPython([string]$Executable, [string[]]$LauncherArgs = @(),
     if (Test-Path -LiteralPath $temporary) { throw 'Probe folder already exists; preserve it.' }
     [IO.Directory]::CreateDirectory($temporary) | Out-Null
     $process = $null
+    $started = $false
     $code = @'
 import sys, struct, platform, json, ssl, venv, ensurepip, subprocess
 assert sys.platform == 'win32' and sys.implementation.name == 'cpython'
@@ -127,7 +128,8 @@ print(json.dumps(dict(executable=sys.executable, version=platform.python_version
         }
         $process = New-Object Diagnostics.Process
         $process.StartInfo = $info
-        $process.Start() | Out-Null
+        $started = $process.Start()
+        if (-not $started) { return $null }
         $stdout = $process.StandardOutput.ReadToEndAsync()
         $stderr = $process.StandardError.ReadToEndAsync()
         if (-not (Wait-DoSutiProbe $process $TimeoutMilliseconds)) { return $null }
@@ -140,7 +142,7 @@ print(json.dumps(dict(executable=sys.executable, version=platform.python_version
     finally {
         $stopped = $false
         try {
-            if ($null -ne $process) {
+            if ($started) {
                 try { Stop-DoSutiProbe $process }
                 catch { throw "Python probe cleanup failed; preserve $temporary. $_" }
             }

@@ -118,8 +118,9 @@ class OperationReuse(TestCase):
             nonlocal changed
             value=source.read_text()
             if not changed:
-                changed=True;source.write_text('new')
+                # Guarantee a new stamp even on filesystems with coarse timestamps.
+                changed=True;source.write_text('new value')
             return value
         with operation():
             self.assertEqual(read(path),'old')
-            self.assertEqual(read(path),'new')
+            self.assertEqual(read(path),'new value')

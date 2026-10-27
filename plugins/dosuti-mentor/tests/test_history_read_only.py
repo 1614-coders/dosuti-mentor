@@ -7,6 +7,7 @@ import sqlite3
 import subprocess
 import sys
 import unittest
+from unittest.mock import patch
 import test_persistence
 import course
 import managed_storage
@@ -138,3 +139,22 @@ class HistoryReadOnly(unittest.TestCase):
         self.assertIn('Cannot read lesson progress', result.stderr)
         self.assertNotIn('Traceback', result.stderr)
         self.assertEqual(self.files(), before)
+
+    def test_writers_close_connections_after_commit_and_rollback(self):
+        opened=[];original=course.db
+        def track(args):
+            connection=original(args);opened.append(connection)
+            return connection
+        with patch.object(course,'db',side_effect=track):
+            with contextlib.redirect_stdout(io.StringIO()):
+                course.bind(self.f.args(chat='another-chat'))
+            self.f.capture(course.progress,topic='Topic',stage='explained',details='Recorded explanation')
+            before=self.path.read_bytes()
+            with patch.object(course,'now',side_effect=ValueError('fixture write failure')):
+                with self.assertRaisesRegex(ValueError,'fixture write failure'):
+                    self.f.capture(course.progress,topic='Topic',stage='explained',details='Not committed')
+            self.assertEqual(self.path.read_bytes(),before)
+        self.assertEqual(len(opened),3)
+        for connection in opened:
+            with self.assertRaisesRegex(sqlite3.ProgrammingError,'closed'):
+                connection.execute('SELECT 1')
