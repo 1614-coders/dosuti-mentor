@@ -34,6 +34,21 @@ class LessonPresentation(unittest.TestCase):
         self.assertEqual(state['onboarding'],'not_asked')
         self.assertEqual(self.files(),before)
 
+    def test_language_and_checks_updates_reach_lesson_without_assessments(self):
+        for focus,checks in [('Python','each_block'),('JavaScript','adaptive')]:
+            path=self.u.f.f.directory/'lesson-preferences.json'
+            path.write_text(json.dumps(dict(answers=dict(subject=dict(value='Backend',
+                area='Программирование',direction='Backend',focus=focus,text=focus)),
+                comment='Объясняй по-русски')),encoding='utf-8')
+            lt.settings(self.u.f.args(scope='profile',set=['checks='+checks],reset=False,
+                onboarding=None,onboarding_file=path))
+            before=self.files();state=self.u.read(session='new-chat')
+            self.assertEqual(state['preferences']['onboarding_answers']['subject']['focus'],focus)
+            self.assertEqual(state['preferences']['onboarding_comment'],'Объясняй по-русски')
+            self.assertEqual(state['preferences']['effective']['checks'],checks)
+            self.assertEqual(state['learning']['attempt_count'],0)
+            self.assertEqual(self.files(),before)
+
     def test_canonical_onboarding_choices_are_used_without_rewriting_values(self):
         for mode in ('adaptive','each_block','end','on_request'):
             with self.subTest(mode=mode):

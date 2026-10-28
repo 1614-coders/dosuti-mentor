@@ -84,6 +84,22 @@ class AdaptivePractice(unittest.TestCase):
         self.assertEqual(state['practice'][0]['help'][0]['request'],'Please show the full solution')
         with self.assertRaises(ValueError):self.attempt()
 
+    def test_solution_before_attempt_restores_without_independent_credit(self):
+        self.task();self.help('solution','Show the solution before I try')
+        before=self.f.path.read_bytes()
+        process=subprocess.run([sys.executable,'-B',str(Path(ul.__file__).with_name('course.py')),
+            'learn-unit','--course',str(self.f.args().course),'--unit-id','maps',
+            '--profile','default','--session','another-chat','--compact'],
+            capture_output=True,encoding='utf-8',timeout=20,env=dict(os.environ,PYTHONUTF8='1'))
+        self.assertEqual(process.returncode,0,process.stderr)
+        state=json.loads(process.stdout)['learning']
+        task=state['practice'][0]
+        self.assertTrue(task['solution_shown']);self.assertIsNone(task['last_attempt'])
+        self.assertFalse(state['all_criteria_demonstrated'])
+        self.assertEqual(self.f.path.read_bytes(),before)
+        with self.assertRaises(ValueError):self.attempt()
+        self.assertEqual(self.f.path.read_bytes(),before)
+
     def test_error_correction_and_fresh_independent_task(self):
         self.task();state=self.attempt(stage='needs_review',answer='Only keys')['learning']
         self.assertEqual(state['practice'][0]['next_action'],'explain_error_then_retry')

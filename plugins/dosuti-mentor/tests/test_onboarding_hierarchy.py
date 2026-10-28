@@ -1,4 +1,8 @@
 """Subject refinements remain question two; interpretation belongs to the mentor."""
+import json
+import os
+import subprocess
+import sys
 import unittest
 import test_onboarding_dialog as fixtures
 import learning_tools as lt
@@ -8,6 +12,41 @@ class OnboardingHierarchy(unittest.TestCase):
     def setUp(self):
         self.f=fixtures.OnboardingDialog();self.f.setUp();self.addCleanup(self.f.doCleanups)
         self.f.save({'outcome':['profession']})
+
+    def test_subject_and_human_language_survive_compact_cli_in_new_process(self):
+        cases = [('Программирование', 'Backend', 'Python'),
+                 ('Программирование', 'Frontend', 'JavaScript'),
+                 ('Программирование', 'Backend', 'C#'),
+                 ('Дизайн', 'UI/UX', 'Figma'), ('Музыка', 'Вокал', 'Общий профиль')]
+        for area, direction, focus in cases:
+            with self.subTest(focus=focus):
+                self.f.save({'subject':dict(value=f'{direction}: {focus}', area=area,
+                    direction=direction, focus=focus, text=f'Хочу {direction}, {focus}')})
+                path=self.f.f.write('human-language.json',dict(comment='Объясняй по-русски. Сохрани примеры из музыки.'))
+                lt.settings(self.f.f.args(scope='profile',set=[],reset=False,onboarding=None,onboarding_file=path))
+                saved=lt.preferences(self.f.f.a)
+                prefs=lt.pref_file(self.f.f.a,'profile');before=prefs.read_bytes()
+                result=subprocess.run([sys.executable,'-B',str(fixtures.PLUGIN/'scripts/course.py'),
+                    'settings','--course',str(self.f.f.a.course),'--profile','default','--compact'],
+                    capture_output=True,encoding='utf-8',timeout=20,env=dict(os.environ,PYTHONUTF8='1'))
+                self.assertEqual(result.returncode,0,result.stderr)
+                restored=json.loads(result.stdout)
+                self.assertEqual(restored['onboarding_answers'],saved['onboarding_answers'])
+                self.assertEqual(restored['onboarding_comment'],saved['onboarding_comment'])
+                self.assertEqual(restored['onboarding_answers']['subject']['focus'],focus)
+                self.assertEqual(prefs.read_bytes(),before)
+
+    def test_changing_subject_and_human_language_are_independent(self):
+        self.f.save(self.f.f.all_onboarding_answers())
+        for area,direction,focus in [('Программирование','Backend','Python'),('Дизайн','UI/UX','Figma')]:
+            saved=self.f.save({'subject':dict(value=direction,area=area,direction=direction,focus=focus,text=focus)})
+            path=self.f.f.write('human-language.json',dict(comment='Explain in English; keep music examples.'))
+            state=lt.settings(self.f.f.args(scope='profile',set=[],reset=False,onboarding=None,onboarding_file=path))
+            self.assertEqual(state['onboarding_answers'],saved['onboarding_answers'])
+            self.assertEqual(state['onboarding_answers']['subject']['focus'],focus)
+            self.assertEqual(state['onboarding'],'complete')
+            self.assertIsNone(state['onboarding_next'])
+            self.assertEqual(lt.preferences(self.f.f.args(session='new-chat')),state)
 
     def test_programming_then_backend_then_language_preserves_all_levels(self):
         state=self.f.save({'subject':dict(value='Программирование и разработка.',area='Программирование и разработка.',text='1',pending=True)})

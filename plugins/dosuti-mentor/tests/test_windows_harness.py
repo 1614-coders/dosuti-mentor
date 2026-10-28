@@ -167,7 +167,9 @@ class WindowsSuiteContract(unittest.TestCase):
         self.assertIn('shell: powershell', workflow)
         self.assertIn('shell: pwsh', workflow)
         self.assertEqual(len(suite.WINDOWS_MODULES), len(set(suite.WINDOWS_MODULES)))
-        for name in ('test_windows_runtime', 'test_process_safety', 'test_unit_event_input', 'test_instruction_contracts', 'test_windows_harness'):
+        for name in ('test_windows_runtime', 'test_process_safety', 'test_unit_event_input',
+                     'test_instruction_contracts', 'test_context', 'test_onboarding_hierarchy',
+                     'test_lesson_presentation', 'test_windows_harness'):
             self.assertIn(name, suite.WINDOWS_MODULES)
 
     def test_profile_uses_standard_loader_and_does_not_hide_import_errors(self):

@@ -86,6 +86,17 @@ class ContextRegression(unittest.TestCase):
         self.assertFalse(summary['meaning_verified'])
         self.assertIn('asr_mass_repetition_requires_review', (folder / 'tutor_context.md').read_text())
 
+    def test_generated_rules_preserve_language_choice_and_adaptive_checks(self):
+        folder = self.add('language-rules', 0, 60)
+        rules = (folder / 'TUTOR_RULES.md').read_text(encoding='utf-8')
+        self.assertNotIn('блоки java', rules)
+        self.assertIn('фактическим языком', rules)
+        self.assertIn('subject', rules)
+        self.assertIn('onboarding_comment', rules)
+        self.assertIn('adaptive', rules)
+        self.assertIn('each_block', rules)
+        self.assertNotIn('проверка понимания, затем следующий шаг', rules)
+
     def test_legacy_packet_is_diagnosed_without_rewriting(self):
         folder = self.add('loop', 0, 60, [(i * 3, i * 3 + 3, 'Ничего.') for i in range(15)])
         packet = course.read(folder / 'tutor_packet.json')

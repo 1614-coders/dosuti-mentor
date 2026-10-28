@@ -18,6 +18,9 @@ WINDOWS_MODULES = (
     'test_process_safety',
     'test_unit_event_input',
     'test_instruction_contracts',
+    'test_context',
+    'test_onboarding_hierarchy',
+    'test_lesson_presentation',
     'test_windows_harness',
 )
 

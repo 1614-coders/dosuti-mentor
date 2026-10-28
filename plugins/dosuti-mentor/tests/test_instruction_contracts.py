@@ -52,6 +52,12 @@ def course_commands():
 
 
 class InstructionContracts(unittest.TestCase):
+    def test_solution_request_exception_is_explicit_in_shared_output_rules(self):
+        content = (PLUGIN / 'references/cli-output.md').read_text(encoding='utf-8')
+        self.assertNotIn('rubric/готовое решение до самостоятельной попытки', content)
+        self.assertIn('по прямой просьбе', content)
+        self.assertIn('самостоятельного', content)
+
     @classmethod
     def setUpClass(cls):
         cls.commands = course_commands()
