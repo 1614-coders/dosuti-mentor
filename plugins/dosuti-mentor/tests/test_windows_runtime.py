@@ -197,6 +197,62 @@ $again=Resolve-DoSutiPython $homePath '' $spec
 if(-not $again.owned -or $again.executable -ne $r.executable) {throw 'private reuse failed'}
 """.replace('ARCHIVE_SHA', sha).replace('EXE_SHA', exe_sha).replace('ARCHIVE_PATH', str(archive)))
 
+    def test_tar_stop_handles_exit_race_but_rejects_unconfirmed_stop(self):
+        self.run_ps("""
+function Stop-DoSutiProbe {throw 'Python tree cleanup must not handle tar'}
+$unstarted=New-Object Diagnostics.Process
+try {Stop-DoSutiTar $unstarted} finally {$unstarted.Dispose()}
+foreach($mode in @('exited','live','race','denied','timeout')) {
+ $process=[pscustomobject]@{Id=123;Mode=$mode;Exited=($mode -eq 'exited');Kills=0;Waits=0}
+ $process | Add-Member -MemberType ScriptProperty -Name HasExited -Value {$this.Exited}
+ $process | Add-Member -MemberType ScriptMethod -Name Kill -Value {
+  $this.Kills++
+  if($this.Mode -eq 'denied') {throw 'fixture kill denied'}
+  $this.Exited=$true
+  if($this.Mode -eq 'race') {throw 'fixture exited during kill'}
+ }
+ $process | Add-Member -MemberType ScriptMethod -Name WaitForExit -Value {
+  param($Milliseconds)
+  if($Milliseconds -ne 5000) {throw 'fixture wrong wait deadline'}
+  $this.Waits++
+  return ($this.Exited -and $this.Mode -ne 'timeout')
+ }
+ $failed=$false
+ try {Stop-DoSutiTar $process}
+ catch {
+  $failed=$true
+  if($mode -notin @('denied','timeout') -or $_.Exception.Message -notmatch 'fixture kill denied|Cannot confirm tar termination') {throw}
+ }
+ if($failed -ne ($mode -in @('denied','timeout'))) {throw ('Wrong stop result: '+$mode)}
+ if($process.Kills -ne [int]($mode -ne 'exited')) {throw 'Wrong kill count'}
+ if($process.Waits -ne [int]($mode -ne 'denied')) {throw 'Missing bounded wait'}
+}
+""")
+
+    def test_unconfirmed_tar_stop_preserves_staging_and_verified_archive(self):
+        archive = self.base / 'preserved.tar.gz'
+        payload = b'not executed fixture'
+        with tarfile.open(archive, 'w:gz') as tar:
+            item = tarfile.TarInfo('python/python.exe'); item.size = len(payload)
+            tar.addfile(item, io.BytesIO(payload))
+        self.run_ps("""
+Initialize-DoSutiHome $homePath | Out-Null
+$spec=[pscustomobject]@{sha256='ARCHIVE_SHA';python_exe_sha256='EXE_SHA'}
+$cache=Join-Path $homePath 'cache/python';[IO.Directory]::CreateDirectory($cache) | Out-Null
+Copy-Item -LiteralPath 'ARCHIVE_PATH' -Destination (Join-Path $cache ($spec.sha256+'.tar.gz'))
+function Invoke-WebRequest {throw 'offline cache must not download'}
+$script:realStopTar=${function:Stop-DoSutiTar}
+function Stop-DoSutiTar {param($Process) & $script:realStopTar $Process; throw 'fixture stop unconfirmed'}
+function Wait-DoSutiProbe {param($Process,$Milliseconds) return $false}
+try {Install-DoSutiPython $homePath $spec;throw 'unexpected success'}
+catch {if($_.Exception.Message -notmatch 'fixture stop unconfirmed') {throw}}
+if(Test-Path -LiteralPath (Join-Path $homePath 'runtime/python')) {throw 'unverified target published'}
+if(@(Get-ChildItem -LiteralPath (Join-Path $homePath 'runtime') -Filter '.python-staging-*' -Force).Count -ne 1) {throw 'unconfirmed staging was removed'}
+if(-not (Test-Path -LiteralPath (Join-Path $cache ($spec.sha256+'.tar.gz')))) {throw 'verified cache lost'}
+""".replace('ARCHIVE_SHA', hashlib.sha256(archive.read_bytes()).hexdigest())
+            .replace('EXE_SHA', hashlib.sha256(payload).hexdigest())
+            .replace('ARCHIVE_PATH', str(archive).replace("'", "''")))
+
     def test_extraction_timeout_and_interrupt_cleanup_and_offline_retry(self):
         payload = b'not executed: verified fixture'
         archive = self.base / 'cached.tar.gz'

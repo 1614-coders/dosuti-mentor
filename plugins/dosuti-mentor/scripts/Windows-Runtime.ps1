@@ -212,6 +212,20 @@ function Get-DoSutiTar {
     return Join-Path ([Environment]::SystemDirectory) 'tar.exe'
 }
 
+function Stop-DoSutiTar($Process) {
+    try { $null = $Process.Id } catch { return } # Start failed: no process exists.
+    # The fixed Windows system tar is a leaf; Python probes still use tree cleanup.
+    try {
+        if (-not $Process.HasExited) { $Process.Kill() }
+    } catch {
+        # Exit between HasExited and Kill is safe only when the handle confirms it.
+        if (-not $Process.HasExited) { throw }
+    }
+    if (-not $Process.WaitForExit(5000)) {
+        throw 'Cannot confirm tar termination; preserve its staging folder.'
+    }
+}
+
 function Install-DoSutiPython([string]$HomePath, $Spec, [string]$TargetName = 'python') {
     return Invoke-DoSutiRuntimeLock $HomePath {
     if ($TargetName -notmatch '^python(?:-candidate-[a-f0-9]{32})?$') { throw 'Invalid private Python target.' }
@@ -269,7 +283,7 @@ function Install-DoSutiPython([string]$HomePath, $Spec, [string]$TargetName = 'p
             if (-not (Wait-DoSutiProbe $process 300000)) { throw 'Python archive extraction timed out.' }
             if ($process.ExitCode -ne 0) { throw 'Cannot extract Python; Windows tar.exe failed.' }
         } finally {
-            try { Stop-DoSutiProbe $process; $extractionStopped = $true }
+            try { Stop-DoSutiTar $process; $extractionStopped = $true }
             finally { $process.Dispose() }
         }
         $candidate = Join-Path $staging 'python/python.exe'
