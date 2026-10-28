@@ -31,4 +31,10 @@ class HTMLContent(unittest.TestCase):
         text,_=extract('<article class="markdown-body"><pre>Map&lt;String, Integer&gt; map;\n  a &lt; b &amp;&amp; c &gt; d;</pre></article>');self.assertIn('Map<String, Integer>',text);self.assertIn('  a < b && c > d;',text)
     def test_text_file_unchanged(self):
         with tempfile.TemporaryDirectory() as tmp:
-            p=Path(tmp)/'x.txt';p.write_text('Line\n    code\n');self.assertEqual(text_content(p),('Line\n    code\n','utf8_text'))
+            p=Path(tmp)/'x.txt';p.write_bytes(b'Line\n    code\n');self.assertEqual(text_content(p),('Line\n    code\n','utf8_text'))
+
+    def test_text_file_crlf_interior_is_preserved(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            p=Path(tmp)/'x.txt';raw=b'Line\r\n    code\r\n';p.write_bytes(raw)
+            self.assertEqual(text_content(p),('Line\r\n    code\n','utf8_text'))
+            self.assertEqual(p.read_bytes(),raw)
