@@ -213,7 +213,8 @@ function Get-DoSutiTar {
 }
 
 function Stop-DoSutiTar($Process) {
-    try { $null = $Process.Id } catch { return } # Start failed: no process exists.
+    try { $processId = $Process.Id } catch { return }
+    if (-not $processId) { return } # PowerShell may adapt an unstarted Id to null.
     # The fixed Windows system tar is a leaf; Python probes still use tree cleanup.
     try {
         if (-not $Process.HasExited) { $Process.Kill() }
