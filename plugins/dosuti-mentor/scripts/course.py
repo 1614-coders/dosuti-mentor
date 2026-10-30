@@ -370,8 +370,12 @@ def attach(args):
             raise ValueError('--repository is only valid for code')
     if not args.none and args.source and args.kind in ('code','homework'):
         remote=source_kind(args.source)=='remote'
-        html_homework=args.kind=='homework' and Path(args.source).suffix.lower() in ('.html','.htm')
-        if (remote and not (args.kind=='code' and github_url(args.source))) or html_homework:
+        document_homework=args.kind=='homework' and Path(args.source).suffix.lower() in ('.html','.htm','.pdf')
+        if args.kind=='homework' and not remote and not document_homework:
+            source=Path(args.source).expanduser()
+            if source.is_file():
+                with source.open('rb') as stream:document_homework=stream.read(5)==b'%PDF-'
+        if (remote and not (args.kind=='code' and github_url(args.source))) or document_homework:
             from material_sources import attach_material
             return attach_material(args)
     return attach_local(args)
@@ -552,8 +556,8 @@ def prepare(args):
             video, checksum = checked_video(directory, data, getattr(args,'download_fragments',4), getattr(args,'site_timeout',1800), getattr(args,'video_quality','best'))
             duration = args.duration
             if duration is None:
-                from media_input import probe_media
-                duration = probe_media(video)['video']['end'] - args.start
+                from media_input import probe_media, timeline_end
+                duration = timeline_end(probe_media(video)) - args.start
             if duration <= 0:
                 raise ValueError('Fragment duration must be positive')
             home = find_home(root(args))
@@ -908,6 +912,7 @@ def main():
             group.add_argument('--remove')
         elif name == 'resource':
             command.add_argument('--action',choices=['list','fetch','extract','review'],default='list')
+            command.add_argument('--visual-pages',type=int,nargs='+',help='Render only these PDF resource pages with bounded local limits')
             command.add_argument('--resource-id')
             command.add_argument('--expected-revision')
             command.add_argument('--notes')
@@ -946,7 +951,7 @@ def main():
             command.add_argument('--start', type=float, default=0)
             command.add_argument('--duration', type=float)
             command.add_argument('--frame-every', type=float, default=10,
-                                 help='Seconds between navigation frames (default: 10); use scan-screen for brief changes')
+                                 help='Maximum gap between navigation frames (default: 10), with scene candidates; scan-screen for small/brief changes')
             command.add_argument('--model', choices=['tiny', 'base', 'small', 'medium', 'large-v3'], default='small')
             command.add_argument('--model-path', type=Path)
             command.add_argument('--language', default='ru')

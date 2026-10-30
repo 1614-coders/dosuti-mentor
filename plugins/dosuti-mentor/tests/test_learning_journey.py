@@ -92,7 +92,8 @@ class LearningJourney(unittest.TestCase):
                     notes='Synthetic prepared transcript and sampled frame', lesson='lesson-01', start=0, end=60)])
         study_units.unit(self.args(unit_file=self.write('unit-input.json', card), expected_revision=0))
         status = material_status.view(self.args(unit_id='example', lesson=None))['material']
-        self.assertEqual(status['status'], 'ready')
+        self.assertEqual(status['status'], 'limited')
+        self.assertIn('recorded_material_fact_concerns', status['reasons'])
         self.assertTrue(status['reuse_preparation'])
         unit = unit_learning.learn_unit(self.args(unit_id='example'))
         self.assertFalse(unit['unit']['stale'])
@@ -272,7 +273,10 @@ class LearningJourney(unittest.TestCase):
                     prerequisites=[], uncertainties=[], sources=[dict(kind='video', role='teacher',
                     notes='Synthetic prepared transcript and sampled frame', lesson='lesson-01', start=0, end=60)])
         study_units.unit(self.args(unit_file=self.write('unit-input.json', card), expected_revision=0))
-        self.assertEqual(material_status.view(self.args(unit_id='example', lesson=None))['material']['status'], 'ready')
+        material = material_status.view(self.args(unit_id='example', lesson=None))['material']
+        self.assertEqual(material['status'], 'limited')
+        self.assertIn('recorded_material_fact_concerns', material['reasons'])
+        self.assertTrue(material['reuse_preparation'])
         self.decide(dict(goal=dict(description='Become a Java backend developer', purpose='First internship')))
         self.decide(dict(proposal=dict(summary='Close the observed gap, then use it in a transfer task',
             steps=['Practice assignment basics', 'Use the result in a transfer task'], step_bases=[

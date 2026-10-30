@@ -109,7 +109,11 @@ def run(command, *, check=False, timeout=None, capture_output=False, input=None,
             output = {}
             for name, stream in captures.items():
                 stream.seek(0)
-                raw = stream.read(MAX_CAPTURE_BYTES + 1)
+                size=os.fstat(stream.fileno()).st_size
+                if size>MAX_CAPTURE_BYTES:raise RuntimeError('External program output exceeded capture limit')
+                raw = stream.read(size + 1)
+                if len(raw)!=size or os.fstat(stream.fileno()).st_size!=size:
+                    raise RuntimeError('External program output changed during collection; no partial result accepted')
                 if len(raw) > MAX_CAPTURE_BYTES:
                     raise RuntimeError('External program output exceeded capture limit')
                 output[name] = (raw.decode(kwargs.get('encoding') or locale.getpreferredencoding(False),

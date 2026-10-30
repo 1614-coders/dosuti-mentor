@@ -48,7 +48,7 @@ def validate(source,stored=False):
         digest(revision[7:])
 
 
-def excerpt(path,source,expected):
+def excerpt(path,source,expected,include_metadata=False):
     checked(path)
     if not path.is_file() or path.stat().st_size>8*1024*1024:raise ValueError('Source file missing or exceeds 8 MiB')
     with path.open('rb') as stream:raw=stream.read(8*1024*1024+1)
@@ -58,6 +58,9 @@ def excerpt(path,source,expected):
     if source['end_line']>len(lines):raise ValueError('Source lines exceed content')
     text='\n'.join(lines[source['start_line']-1:source['end_line']])
     if len(text)>100_000:raise ValueError('Select at most 100000 source characters')
+    if include_metadata:
+        from material_facts import extraction_context
+        return text,extraction_context(lines,source['start_line'],source['end_line'])
     return text
 
 
@@ -107,8 +110,11 @@ def evidence(root,source,writing=False):
         if item.get('status')!='reviewed' or not item.get('review_valid'):raise ValueError('Resource requires extraction and review')
         signature=digest({k:v for k,v in item['review'].items() if k!='updated'})
         value.update(revision=resource_revision(item),review_sha256=signature)
+        selected,quality=excerpt(Path(item['extracted_file']),source,item['text_sha256'],include_metadata=True)
+        if item.get('visuals'):
+            context.update(visual_bundle=item['visuals'],raw_file=item['origin']['raw_file'],source_sha256=item['origin']['sha256'])
         context.update(resource_id=source['resource_id'],revision=value['revision'],review=item['review'],
-                       origin=item['source'],text=excerpt(Path(item['extracted_file']),source,item['text_sha256']))
+                       origin=item['source'],extraction=item.get('extraction'),extraction_quality=quality,text=selected)
     else:
         from spoken_homework import resolve
         homework=resolve(directory,data)

@@ -4,3 +4,4 @@ Pillow>=11,<13
 certifi
 yt-dlp>=2025.1
 av>=14,<20
+pdfplumber>=0.11.9,<0.12

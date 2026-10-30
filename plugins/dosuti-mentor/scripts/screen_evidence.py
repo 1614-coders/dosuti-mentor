@@ -21,12 +21,13 @@ def bounds(start, duration, sample_every):
         raise ValueError('Screen start must be nonnegative; duration/interval positive')
 
 
-def extract_frames(video, folder, start, duration, sample_every, ffmpeg, threads=None):
+def extract_frames(video, folder, start, duration, sample_every, ffmpeg, threads=None, scene_changes=False):
     bounds(start,duration,sample_every)
     folder = Path(folder)
     folder.mkdir(parents=True,exist_ok=True)
     # Limit the input, so a filter with no later output does not decode the rest of a long lecture.
-    selection=f"select='lt(t,{duration})*(isnan(prev_selected_t)+gte(t-prev_selected_t,{sample_every}))',showinfo"
+    changes=f"+gt(scene,0.02)*gte(t-prev_selected_t,{min(sample_every,.5)})" if scene_changes else ''
+    selection=f"select='lt(t,{duration})*(isnan(prev_selected_t)+gte(t-prev_selected_t,{sample_every}){changes})',showinfo"
     result=preparation_run([ffmpeg,'-hide_banner','-loglevel','info','-y',
         *(['-threads', str(threads), '-filter_threads', str(threads)] if threads else []),
         '-ss',str(start),'-t',str(duration),'-i',str(video),'-an','-vf',selection,
@@ -52,7 +53,8 @@ def extract_frames(video, folder, start, duration, sample_every, ffmpeg, threads
             raise ValueError('Decoded frame timestamp is outside interval or not increasing')
         previous=seconds
         records.append(dict(approx_seconds=start+seconds,source_seconds=start+seconds,
-            decoded_offset=seconds,file=path.name,timestamp_accuracy='decoded_video_timestamp'))
+            decoded_offset=seconds,file=path.name,timestamp_accuracy='decoded_video_timestamp',
+            selection='scene_or_periodic_v1' if scene_changes else 'periodic'))
     return records
 
 
@@ -177,21 +179,28 @@ def scan(video, output, start, duration, sample_every, checksum, rebuild=False,p
                 raise ValueError('Video changed before screen scan')
             rows=extract_frames(video,staging/'frames',start,duration,sample_every,imageio_ffmpeg.get_ffmpeg_exe())
             previous=None;last_selected=None;previous_rgb=None;last_anchor=-math.inf
-            caret=RepeatedCaret()
+            caret=RepeatedCaret();previous_hash=None
             for index,row in enumerate(rows,1):
                 row['id']=f'f{index:05d}'
                 row['file']='frames/'+row['file']
-                with Image.open(staging/row['file']) as image:
-                    rgb=image.convert('RGB')
-                    current=rgb.convert('L').resize((320,180))
-                metrics=visual_difference(previous,current) if previous else None
-                local=local_difference(previous_rgb,rgb) if previous_rgb is not None else None
+                frame_checksum=file_hash(staging/row['file'])
+                if previous is not None and frame_checksum==previous_hash:
+                    rgb=previous_rgb;current=previous
+                    metrics=dict(changed_fraction=0.0,max_tile_mean=0.0)
+                    local=dict(strong_pixels=0,max_tile_pixels=0,bounds=None)
+                else:
+                    with Image.open(staging/row['file']) as image:
+                        rgb=image.convert('RGB')
+                        current=rgb.convert('L').resize((320,180))
+                    metrics=visual_difference(previous,current) if previous else None
+                    local=local_difference(previous_rgb,rgb) if previous_rgb is not None else None
+                previous_hash=frame_checksum
                 repeated_caret=caret.observe(previous_rgb,rgb,local) if previous_rgb is not None else False
                 accumulated=visual_difference(last_selected,current) if last_selected is not None else None
                 changed=bool(not repeated_caret and metrics and (metrics['changed_fraction']>=.0005 or metrics['max_tile_mean']>=4 or
                     local['max_tile_pixels']>=4 or accumulated['max_tile_mean']>=4))
                 anchor=row['approx_seconds']-last_anchor>=10
-                row.update(sha256=file_hash(staging/row['file']),visual_change_metrics=metrics,
+                row.update(sha256=frame_checksum,visual_change_metrics=metrics,
                     review_candidate=previous is None or changed or anchor,
                     candidate_reason='initial' if previous is None else ('pixel_change' if changed else ('periodic_anchor' if anchor else ('repeated_caret_like_change' if repeated_caret else 'not_selected'))),
                     local_change_metrics=local, repeated_caret_like_change=repeated_caret,

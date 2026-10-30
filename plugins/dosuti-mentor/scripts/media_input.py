@@ -44,15 +44,23 @@ def probe_media(path):
                 row['start'] = left if row['start'] is None else min(row['start'], left)
                 row['end'] = right if row['end'] is None else max(row['end'], right)
             videos = [r for r in tracks.values() if r['kind'] == 'video' and r['end'] is not None]
-            if not videos:
-                raise ValueError('No readable video packets')
-            video = videos[0]
-            if video['declared_end'] is not None and video['declared_end'] - video['end'] > max(.15, 3 * video['frame_duration']):
+            audible=[r for r in tracks.values() if r['kind']=='audio' and r['end'] is not None]
+            if not videos and not audible:
+                raise ValueError('No readable audio/video packets')
+            video = videos[0] if videos else None
+            if video and video['declared_end'] is not None and video['declared_end'] - video['end'] > max(.15, 3 * video['frame_duration']):
                 raise ValueError('Damaged media: video ends before its declared duration; restore a complete source')
             return dict(origin=origin, video=video, audio=[r for r in tracks.values() if r['kind'] == 'audio'],
                         tracks=list(tracks.values()), verification='packet_inventory_not_semantic_review')
     except (OSError, RuntimeError) as error:
         raise ValueError(f'Cannot inspect media: {error}') from error
+
+
+def timeline_end(media):
+    if media.get('video'):return media['video']['end']
+    ends=[r['end'] for r in media['audio'] if r.get('end') is not None]
+    if not ends:raise ValueError('No readable audio/video timeline')
+    return max(ends)
 
 
 def signal_stats(path):

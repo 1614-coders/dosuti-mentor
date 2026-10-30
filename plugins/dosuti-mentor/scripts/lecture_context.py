@@ -254,6 +254,9 @@ def assemble(directory, data, start, window, include_code_stages=True, include_t
     frames, frame_aliases = deduplicate(frames, lambda f: (f['approx_seconds'], f['sha256']))
     speech.sort(key=lambda r: (r['start'], r['end'], r['id']))
     frames.sort(key=lambda f: (f['approx_seconds'], f['id']))
+    from media_alignment import align
+    align(speech,frames)
+    _,speech_gaps=coverage([(r['start'],r['end']) for r in speech if r['text'].strip()],start,stop)
     notes = dict(observations=[], uncertainties=[], sources=[])
     aliases = {**speech_aliases, **frame_aliases}
     for packet, source in packets:
@@ -312,6 +315,12 @@ def assemble(directory, data, start, window, include_code_stages=True, include_t
         warnings.append('no_prepared_source_identity')
     elif video_state == 'original_unavailable_using_pinned_hash':
         warnings.append('original_video_unavailable')
+    if speech_gaps:
+        warnings.append('intervals_without_transcript_not_confirmed_silence')
+    if any(r['quality_warnings'] for r in speech):
+        warnings.append('individual_asr_segments_require_review')
+    if not frames:
+        warnings.append('no_visual_evidence_in_window')
     if gaps:
         warnings.append('unprepared_intervals')
     if conflicting:
@@ -339,7 +348,8 @@ def assemble(directory, data, start, window, include_code_stages=True, include_t
                 video_integrity=video_state, code_integrity=snapshot_state,
                 coverage=covered, gaps=gaps, requested_window=[start, stop],
                 sources=sources,screen_scan_sources=screen_sources, rules=[source['rules_file'] for source in sources],
-                speech=speech, boundary_speech=crossings, speech_overlaps=conflicting,
+                speech=speech, speech_gaps=speech_gaps,
+                speech_gap_interpretation='no_transcript_not_proof_of_silence', boundary_speech=crossings, speech_overlaps=conflicting,
                 speech_overlap_details_truncated=truncated,
                 frames=frames, visual_notes=notes, warnings=warnings,
                 term_notes=terms, code_stages=stages, teacher_code=data['code'], teacher_repositories=teacher_repositories,

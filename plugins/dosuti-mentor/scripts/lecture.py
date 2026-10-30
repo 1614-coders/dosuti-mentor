@@ -23,7 +23,7 @@ def main():
     parser.add_argument('--start', type=float, default=0)
     parser.add_argument('--duration', type=float, default=1200)
     parser.add_argument('--frame-every', type=float, default=10,
-                        help='Seconds between navigation frames (default: 10); use scan-screen for brief changes')
+                        help='Maximum gap between navigation frames (default: 10), with scene candidates; scan-screen for small/brief changes')
     parser.add_argument('--model', default='small')
     parser.add_argument('--language', default='ru')
     parser.add_argument('--prompt', default='')

@@ -170,7 +170,9 @@ class WindowsSuiteContract(unittest.TestCase):
         for name in ('test_windows_runtime', 'test_process_safety', 'test_unit_event_input',
                      'test_instruction_contracts', 'test_context', 'test_onboarding_hierarchy',
                      'test_lesson_presentation', 'test_windows_harness',
-                     'test_html_content', 'test_html_structure', 'test_html_limits'):
+                     'test_html_content', 'test_html_structure', 'test_html_limits',
+                     'test_pdf_content', 'test_pdf_import', 'test_media_quality',
+                     'test_material_facts', 'test_visual_materials', 'test_quality_optimization'):
             self.assertIn(name, suite.WINDOWS_MODULES)
 
     def test_profile_uses_standard_loader_and_does_not_hide_import_errors(self):

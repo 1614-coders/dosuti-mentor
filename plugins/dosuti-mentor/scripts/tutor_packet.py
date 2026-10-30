@@ -3,7 +3,7 @@ import argparse
 import json
 from pathlib import Path
 import math
-from lecture_context import number, interval
+from lecture_context import number, interval, coverage
 from source_integrity import verify_evidence
 from atomic_files import atomic_json, atomic_text
 from asr_quality import diagnose
@@ -40,7 +40,9 @@ RULES = """# Режим преподавания по записи
 6. Не исправляй неоднозначный ASR молча по общим знаниям. Если речь и кадры
    не дают уверенного ответа, пометь пробел и вернись к этому моменту видео.
    При asr_quality.status=requires_review проверь подозрительные участки по
-   источнику до их объяснения. Отсутствие предупреждений не подтверждает текст.
+   источнику до их объяснения. Проверяй также quality_warnings отдельного фрагмента.
+   speech_gaps не доказывают тишину; frame_ids — только связь по времени,
+   а не доказательство соответствия речи экрану. Отсутствие предупреждений не подтверждает текст.
 7. Прочитай visual_notes.json перед продолжением. Если материал находится в курсе
    course.py, читай и обновляй общий прогресс выбранного профиля через course.py,
    а не отдельный progress.json фрагмента. Для самостоятельного фрагмента без
@@ -53,6 +55,24 @@ RULES = """# Режим преподавания по записи
 def stamp(seconds):
     s = int(seconds)
     return f'{s // 3600:02}:{s // 60 % 60:02}:{s % 60:02}'
+
+
+def navigation_windows(speech,frames,start,end):
+    """Sorted inputs: each event enters once; crossings retain all original window links."""
+    windows=[];active=[];speech_index=0;frame_index=0
+    for index in range(math.ceil((end-start)/120)):
+        cursor=start+index*120;stop=min(cursor+120,end)
+        active=[row for row in active if row['end']>cursor]
+        while speech_index<len(speech) and speech[speech_index]['start']<stop:
+            row=speech[speech_index];speech_index+=1
+            if row['end']>cursor:active.append(row)
+        selected=[]
+        while frame_index<len(frames) and frames[frame_index]['approx_seconds']<stop:
+            row=frames[frame_index];frame_index+=1
+            if row['approx_seconds']>=cursor:selected.append(row['id'])
+        windows.append(dict(start=cursor,end=stop,boundary_type='time_window',
+            speech_ids=[row['id'] for row in active],frame_ids=selected))
+    return windows
 
 
 def build_packet(folder, display_folder=None):
@@ -98,25 +118,24 @@ def build_packet(folder, display_folder=None):
             raise ValueError('Missing frame or frame outside lesson folder')
         frames.append(dict(frame, id=f'f{i:05d}', absolute_path=str(display_folder / frame['file']),
                            verification='not_inspected', timestamp_accuracy=frame.get('timestamp_accuracy','approximate')))
+    from media_alignment import align
+    align(speech,frames)
+    _,speech_gaps=coverage([(r['start'],r['end']) for r in speech if r['text'].strip()],start,end)
     # These are navigation windows, not automatically inferred topic boundaries.
-    windows = []
-    for index in range(count):
-        cursor = start + index * 120
-        stop = min(start + (index + 1) * 120, end)
-        windows.append({'start': cursor, 'end': stop, 'boundary_type': 'time_window',
-                        'speech_ids': [r['id'] for r in speech if r['start'] < stop and r['end'] > cursor],
-                        'frame_ids': [f['id'] for f in frames if cursor <= f['approx_seconds'] < stop]})
+    windows=navigation_windows(speech,frames,start,end)
     packet = {'schema_version': 1, 'purpose': 'assistant_context_for_dialogue',
               'source': manifest['source'], 'coverage': {'start': start, 'end': end},
               'source_sha256': manifest.get('source_sha256'),
               'source_revision': manifest.get('source_revision'),
               'recognition': manifest.get('recognition', manifest.get('model')),
-              'asr_quality': diagnose(records),
+              'asr_quality': diagnose(speech),
               'pipeline_version': manifest.get('pipeline_version'),
               'audio_quality': manifest.get('audio_quality', {'status': 'legacy_unverified', 'warnings': ['legacy_media_timeline_requires_rebuild']}),
               'media': manifest.get('media'),
               'limitations': manifest.get('limitations', []), 'speech': speech,
               'frames': frames, 'navigation_windows': windows,
+              'speech_gaps':speech_gaps,
+              'speech_gap_interpretation':'no_transcript_not_proof_of_silence',
               'visual_notes_file': 'visual_notes.json', 'progress_file': 'progress.json'}
     atomic_json(folder / 'tutor_packet.json', packet)
     atomic_text(folder / 'TUTOR_RULES.md', RULES)
@@ -129,11 +148,13 @@ def build_packet(folder, display_folder=None):
              f"Источник: {manifest['source']}. Обработано {stamp(start)}–{stamp(end)}.", '',
              'Сначала прочитай TUTOR_RULES.md, visual_notes.json и progress.json.',
              'Ниже полный распознанный текст и кадры в хронологическом порядке.', '']
-    lines.extend(['Диагностика ASR: ' + json.dumps(packet['asr_quality'], ensure_ascii=False), ''])
+    lines.extend(['Диагностика ASR: ' + json.dumps(packet['asr_quality'], ensure_ascii=False),
+                  'Интервалы без расшифровки (не доказательство тишины): '+json.dumps(speech_gaps), ''])
     events = [(r['start'], 1, r) for r in speech] + [(f['approx_seconds'], 0, f) for f in frames]
     for seconds, kind, item in sorted(events, key=lambda e: (e[0], e[1])):
         if kind:
-            lines.extend([f"[{item['id']} {stamp(item['start'])}–{stamp(item['end'])}; ASR не проверен] {item['text']}", ''])
+            warning='; '+','.join(item['quality_warnings']) if item['quality_warnings'] else ''
+            lines.extend([f"[{item['id']} {stamp(item['start'])}–{stamp(item['end'])}; ASR не проверен{warning}] {item['text']}", ''])
         else:
             lines.extend([f"[{item['id']} около {stamp(seconds)}] Кадр: {item['absolute_path']}", ''])
     atomic_text(folder / 'tutor_context.md', '\n'.join(lines))

@@ -40,6 +40,11 @@ def path_fields(data):
             yield ('resources', 'items', index, 'source')
         yield ('resources', 'items', index, 'origin', 'raw_file')
         yield ('resources', 'items', index, 'extracted_file')
+        yield ('resources', 'items', index, 'visuals', 'folder')
+        visual=item.get('visuals')
+        if isinstance(visual,dict) and isinstance(visual.get('images'),list) and len(visual['images'])<=24:
+            for image_index,_ in enumerate(visual['images']):
+                yield ('resources','items',index,'visuals','images',image_index,'path')
     for name, code in data.get('code_repositories', {}).items():
         yield ('code_repositories', name, 'snapshot')
         yield ('code_repositories', name, 'origin', 'raw_file')

@@ -9,6 +9,7 @@ from urllib.parse import urlsplit
 from atomic_files import atomic_json
 from profile_storage import checked
 from storage_lock import file_lock
+from read_snapshot import cached, observed
 
 SCHEMA='topic_research_v1'
 
@@ -28,6 +29,57 @@ def url(value):
 
 def fields(value,keys):
     if not isinstance(value,dict) or set(value)!=set(keys.split()):raise ValueError('Invalid research event fields')
+
+
+def validate_claims(review,state,stored):
+    claims=review.get('claims',[])
+    if not isinstance(claims,list) or len(claims)>10:raise ValueError('Review permits up to 10 claims')
+    ids=set()
+    for claim in claims:
+        fields(claim,'id statement status start_line end_line notes evidence')
+        import course
+        course.slug(claim['id'])
+        if claim['id'] in ids:raise ValueError('Duplicate claim ID')
+        ids.add(claim['id'])
+        for key in ('statement','notes'):text(claim[key],'claim '+key)
+        if claim['status'] not in ('supported','contradictory','unverified','insufficient'):raise ValueError('Invalid recorded claim status')
+        references=claim['evidence']
+        if not isinstance(references,list) or len(references)>4:raise ValueError('Claim permits up to 4 references')
+        if claim['status']=='supported' and not references:raise ValueError('Supported assessment requires a source reference')
+        for item in [claim]+references:
+            if not isinstance(item,dict):raise ValueError('Claim reference must be an object')
+            if any(type(item.get(k)) is not int for k in ('start_line','end_line')) or not 1<=item['start_line']<=item['end_line']:
+                raise ValueError('Claim/reference requires valid source lines')
+        for ref in references:
+            fields(ref,'source_id start_line end_line quote'+(' source_sha256' if stored else ''))
+            capture=state['sources'].get(ref['source_id']) if isinstance(ref['source_id'],str) else None
+            if not capture or capture['status']!='captured':raise ValueError('Claim reference source unavailable')
+            text(ref['quote'],'reference quote')
+            if stored and ref['source_sha256']!=capture['sha256']:raise ValueError('Claim reference hash changed')
+        if claim['status']=='contradictory' and len({r['source_id'] for r in references})<2:
+            raise ValueError('Recorded contradiction requires two source references; independence is not inferred')
+
+
+def bind_claims(folder,state,review,stored=False,quality=None):
+    """Verify locator/quote binding, never whether the statement is semantically true."""
+    validate_claims(review,state,stored)
+    result=deepcopy(review);cache={}
+    def lines(identity):
+        if identity not in cache:
+            cache[identity]=snapshot(folder,state['sources'][identity]).splitlines()
+            if quality is not None:
+                from material_facts import extraction_context
+                quality[identity]=extraction_context(cache[identity],1,len(cache[identity]))
+                quality[identity]['source_url']=state['sources'][identity]['url']
+        return cache[identity]
+    for claim in result.get('claims',[]):
+        if claim['end_line']>len(lines(review['source_id'])):raise ValueError('Claim anchor exceeds source')
+        for ref in claim['evidence']:
+            content=lines(ref['source_id'])
+            if ref['end_line']>len(content) or ref['quote']!='\n'.join(content[ref['start_line']-1:ref['end_line']]):
+                raise ValueError('Claim quote does not match the complete selected source lines')
+            ref['source_sha256']=state['sources'][ref['source_id']]['sha256']
+    return result
 
 
 def apply(state,value,stored=False):
@@ -77,13 +129,14 @@ def apply(state,value,stored=False):
         else:text(value['text_file'],'text_file')
         state['sources'][value['id']]=deepcopy(value)
     elif action=='review':
-        fields(value,'action source_id verdict version_fit observed_version notes')
+        fields(value,'action source_id verdict version_fit observed_version notes'+(' claims' if 'claims' in value else ''))
         if not isinstance(value['source_id'],str) or value['source_id'] not in state['sources']:raise ValueError('Unknown research source')
         if state['sources'][value['source_id']]['status']!='captured':raise ValueError('Cannot review an unavailable source')
         if value['verdict'] not in ('accepted','excluded') or value['version_fit'] not in ('compatible','conflict','unknown'):raise ValueError('Invalid research review')
         text(value['observed_version'],'observed version',True);text(value['notes'],'review notes')
         if value['verdict']=='accepted' and (value['version_fit']!='compatible' or value['observed_version'] is None):
             raise ValueError('Accepted source requires a manually checked compatible version')
+        validate_claims(value,state,stored)
         state['reviews'][value['source_id']]=deepcopy(value)
     else:raise ValueError('Unknown research action')
 
@@ -100,15 +153,20 @@ def replay(data):
     return state
 
 
-def snapshot(folder,value):
-    p=folder/value['snapshot'];checked(folder/'snapshots',True);checked(p)
-    if not p.is_file() or p.stat().st_size>800000:raise ValueError('Research snapshot missing or too large')
-    raw=p.read_bytes()
-    if hashlib.sha256(raw).hexdigest()!=value['sha256']:raise ValueError('Research snapshot changed')
+@cached(limit=40)
+@observed
+def _snapshot_text(path,expected,count):
+    if not path.is_file() or path.stat().st_size>800000:raise ValueError('Research snapshot missing or too large')
+    raw=path.read_bytes()
+    if len(raw)>800000 or hashlib.sha256(raw).hexdigest()!=expected:raise ValueError('Research snapshot changed')
     content=raw.decode('utf-8')
-    if len(content)!=value['characters']:raise ValueError('Research snapshot character count changed')
+    if len(content)!=count:raise ValueError('Research snapshot character count changed')
     return content
 
+
+def snapshot(folder,value):
+    p=folder/value['snapshot'];checked(folder/'snapshots',True);checked(p)
+    return _snapshot_text(p,value['sha256'],value['characters'])
 
 
 def load_research(root,name):
@@ -143,7 +201,9 @@ def research(args):
             if expected!=data['revision']:raise ValueError('Research changed; read before writing')
             apply(deepcopy(state),value)
             pending=None
-            if value['action']=='review':snapshot(folder,state['sources'][value['source_id']])
+            if value['action']=='review':
+                snapshot(folder,state['sources'][value['source_id']])
+                if 'claims' in value:value=bind_claims(folder,state,value)
             if value['action']=='capture' and value['status']=='captured':
                 source=Path(value['text_file']).expanduser();checked(source)
                 if not source.is_file() or source.stat().st_size>800000:raise ValueError('Provide a UTF-8 excerpt within 800000 bytes')
@@ -194,16 +254,24 @@ def research(args):
                 if staged is not None and checked(staged)==owned:staged.unlink()
     data,state=load();sources=[]
     for identity,source in state['sources'].items():
-        row=deepcopy(source);review=state['reviews'].get(identity);row.update(review=review,eligible=False,text=None)
+        row=deepcopy(source);review=state['reviews'].get(identity);row.update(review=review,eligible=False,text=None);quality={};citation_quality={};line_count=0
         if source['status']=='captured':
             try:
                 content=snapshot(folder,source);row['integrity']='verified'
+                from material_facts import extraction_context
+                lines=content.splitlines();line_count=len(lines);quality=extraction_context(lines,1,line_count)
+                if review and 'claims' in review:bind_claims(folder,state,review,stored=True,quality=citation_quality)
                 row['eligible']=bool(review and review['verdict']=='accepted')
                 if row['eligible']:row.update(text=content,text_file=str((folder/source['snapshot']).resolve()))
             except (OSError,ValueError) as error:row.update(integrity='stale',reason=str(error))
+        from material_facts import source_assurance
+        row['fact_assurance']=source_assurance(dict(kind='research',review=review,capture=source,
+            research_id=name,source_id=identity,start_line=1,end_line=line_count,
+            extraction_quality=quality,citation_quality=citation_quality,text=row.get('text') or ''))
         sources.append(row)
     budget=state['request']['budget'] if state['request'] else None
     return dict(schema=SCHEMA,revision=data['revision'],request=state['request'],queries=list(state['queries'].values()),sources=sources,
                 used=dict(queries=len(state['queries']),pages=len(sources),characters=state['characters']),budget=budget,
                 verification='assistant_recorded_search_and_review_not_automatic_proof',
+                eligibility_scope='integrity_and_recorded_review_not_factual_truth',
                 limitations=['Queries are reservations, not proof a search tool was called','URL and captured text association recorded by assistant, not network-attested','No automatic search, unit creation, grading or token metering'])

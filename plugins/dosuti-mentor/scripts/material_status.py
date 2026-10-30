@@ -2,10 +2,11 @@
 
 
 def unit_state(row):
-    status = 'stale' if row['stale'] else ('limited' if row['uncertainties'] else 'ready')
+    status = 'stale' if row['stale'] else ('limited' if row['uncertainties'] or row.get('fact_assurance',{}).get('needs_review') else 'ready')
     return dict(status=status, reuse_preparation=not row['stale'],
                 content_sha256=row['content_sha256'],
-                reasons=row['reasons'] if row['stale'] else row['uncertainties'],
+                reasons=row['reasons'] if row['stale'] else row['uncertainties']+
+                    (['recorded_material_fact_concerns'] if row.get('fact_assurance',{}).get('needs_review') else []),
                 next_action='review_sources' if row['stale'] else 'open_learn_unit',
                 readiness_basis='reviewed_unit_annotation_not_automatic_proof')
 

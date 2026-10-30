@@ -40,6 +40,11 @@ def validate(value,stored=False):
             raise ValueError('Source role must be teacher, external or assistant')
         if not isinstance(source.get('notes'),str) or not source['notes'].strip() or len(source['notes'])>4000:
             raise ValueError('Source review notes required')
+        if 'visuals' in source:
+            if source.get('kind') not in ('video','resource'):raise ValueError('Visuals require video or PDF resource')
+            from visual_materials import validate_annotations
+            validate_annotations(source['visuals'],stored)
+            source={k:v for k,v in source.items() if k!='visuals'}
         if source.get('kind')=='text':
             fields={'kind','role','notes','start_line','end_line'}|({'snapshot','sha256','original_path'} if stored else {'path'})
             if set(source)!=fields:raise ValueError('Invalid text source fields')
@@ -181,8 +186,10 @@ def text_source(root,source,writing=False,pending=None):
         value={k:v for k,v in source.items() if k!='path'}
         value.update(snapshot='study-sources/'+checksum+'.txt',sha256=checksum,original_path=str(path.resolve()))
     else:value=deepcopy(source)
+    from material_facts import extraction_context
     return value,dict(kind='text',role=source['role'],notes=source['notes'],start_line=source['start_line'],
-                      end_line=source['end_line'],sha256=checksum,text=excerpt)
+                      end_line=source['end_line'],sha256=checksum,text=excerpt,
+                      extraction_quality=extraction_context(lines,source['start_line'],source['end_line']))
 
 
 def video_source(root,source,writing=False):
@@ -200,7 +207,7 @@ def video_source(root,source,writing=False):
                       start=source['start'],end=source['end'],context=context)
 
 
-def evidence(root,source,writing=False,pending=None):
+def _base_evidence(root,source,writing=False,pending=None):
     if source['kind']=='timeline':
         from timeline_source import evidence as timeline_evidence
         return timeline_evidence(root,source,writing)
@@ -213,6 +220,15 @@ def evidence(root,source,writing=False,pending=None):
     return structured_evidence(root,source,writing)
 
 
+def evidence(root,source,writing=False,pending=None):
+    base={k:v for k,v in source.items() if k!='visuals'}
+    value,context=_base_evidence(root,base,writing,pending)
+    from visual_materials import bind
+    selected,context=bind(source,context,writing)
+    if 'visuals' in source:value['visuals']=selected
+    return value,context
+
+
 from source_integrity import verification_session
 
 @verification_session
@@ -220,10 +236,12 @@ def checked_units(root,data,names=None,include_contexts=True):
     result={}; units=data['units']
     def check(name):
         if name in result:return result[name]
-        row=deepcopy(units[name]);problems=[];sources=[]
+        row=deepcopy(units[name]);problems=[];sources=[];assurances=[]
+        from material_facts import source_assurance,summarize
         for source in row['sources']:
             try:
                 context=evidence(root,source)[1]
+                context['fact_assurance']=source_assurance(context);assurances.append(context['fact_assurance'])
                 if include_contexts:sources.append(context)
             except (ValueError,OSError,KeyError,TypeError) as error:problems.append(str(error))
         for parent in row['prerequisites']:
@@ -231,7 +249,8 @@ def checked_units(root,data,names=None,include_contexts=True):
             if previous['stale'] or row['prerequisite_hashes'][parent]!=units[parent]['content_sha256']:
                 problems.append('Prerequisite changed or needs review: '+parent)
         row.update(stale=bool(problems),reasons=problems,source_contexts=sources,
-                   verification='assistant_annotation_not_automatic_proof',mastery='not_assessed')
+                   verification='assistant_annotation_not_automatic_proof',mastery='not_assessed',
+                   fact_assurance=summarize(assurances))
         from material_status import unit_state
         row['material_status']=unit_state(row)
         result[name]=row;return row

@@ -27,8 +27,12 @@ class VisibleHTML(HTMLParser):
 def text_content(path,media_type=''):
     path=Path(path)
     if path.stat().st_size>MAX_BYTES:raise ValueError('Text material exceeds 32 MiB')
+    with path.open('rb') as stream:signature=stream.read(5)
+    if signature==b'%PDF-' or 'pdf' in media_type.lower() or path.suffix.lower()=='.pdf':
+        from pdf_content import extract
+        return extract(path)
     raw=path.read_bytes()
-    if raw.startswith((b'%PDF',b'PK\x03\x04')) or 'pdf' in media_type.lower():raise ValueError('PDF/ZIP requires a separate text extraction workflow')
+    if raw.startswith((b'%PDF',b'PK\x03\x04')):raise ValueError('ZIP/binary requires a separate text extraction workflow')
     try:value=raw.decode('utf-8-sig')
     except UnicodeDecodeError:raise ValueError('Only UTF-8 text/HTML is supported; provide an extracted text file for PDF or other formats')
     if '\x00' in value:raise ValueError('Binary material cannot be treated as text')
@@ -85,6 +89,9 @@ def attach_material(args):
     if args.kind=='homework':
         value,method=text_content(raw,origin['media_type']);target=reserve(raw.parent/('extracted-'+uuid.uuid4().hex+'.txt'));target.write_text(value,encoding='utf-8');origin['extraction']=method
     elif not zipfile.is_zipfile(raw):
+        with raw.open('rb') as stream:signature=stream.read(5)
+        if signature==b'%PDF-' or 'pdf' in origin['media_type'].lower() or raw.suffix.lower()=='.pdf':
+            raise ValueError('PDF is teaching material, not a code file')
         # Reject HTML error/login bodies presented as downloadable code.
         if 'html' in origin['media_type'].lower() or raw.read_bytes()[:1024].lstrip().lower().startswith((b'<!doctype html',b'<html')):raise ValueError('Code URL returned HTML; provide a raw code file or ZIP')
         text_content(raw,origin['media_type'])
@@ -120,9 +127,28 @@ def describe(resources):
     return result
 
 
-@importing
 def resource(args):
+    # Hold a per-resource lock across import cleanup as well as registration.
+    # This protects the shared visual cache from a losing request's rollback.
+    if getattr(args,'visual_pages',None) is not None:
+        import course
+        from storage_lock import file_lock
+        if args.action!='extract':raise ValueError('--visual-pages is only valid for resource extract')
+        from pdf_visuals import validate_pages
+        validate_pages(args.visual_pages)
+        directory=course.lesson_path(args);identity=course.slug(args.resource_id)
+        course.read(directory/'lesson.json')
+        with file_lock(directory/('.visual-'+identity+'.lock'),timeout=120):return _resource(args)
+    return _resource(args)
+
+
+@importing
+def _resource(args):
     import course as c
+    if getattr(args,'visual_pages',None) is not None:
+        if args.action!='extract':raise ValueError('--visual-pages is only valid for resource extract')
+        from pdf_visuals import validate_pages
+        validate_pages(args.visual_pages)
     directory=c.lesson_path(args);data=c.read(directory/'lesson.json')
     if args.action=='list':return describe(data['resources'])
     items=data['resources'].get('items',[])
@@ -143,6 +169,10 @@ def resource(args):
                 value,method=text_content(raw,origin.get('media_type',''))
                 target=reserve(raw.parent/('text-'+uuid.uuid4().hex+'.txt'));target.write_text(value,encoding='utf-8');target.chmod(target.stat().st_mode & ~0o222)
                 item.update(extracted_file=str(target.resolve()),text_sha256=file_hash(target),extraction=method,status='extracted_not_reviewed')
+            if getattr(args,'visual_pages',None) is not None:
+                if item.get('extraction')!='pdf_text_layer_v1':raise ValueError('Page images require a PDF resource')
+                from pdf_visuals import prepare
+                item['visuals']=prepare(raw,item,args.visual_pages)
             item['revision']=resource_revision(item)
     elif args.action=='review':
         if not item.get('extracted_file'):raise ValueError('Extract and read the resource text before review')
@@ -155,6 +185,9 @@ def resource(args):
         if current!=original:raise ValueError('Resource changed concurrently; read its current state')
         if integrity(item['origin']['raw_file'],item['origin']['sha256'])!='verified':raise ValueError('Resource source changed during operation')
         if item.get('extracted_file') and integrity(item['extracted_file'],item['text_sha256'])!='verified':raise ValueError('Resource text changed during operation')
+        if item.get('visuals'):
+            from pdf_visuals import verify
+            verify(item['visuals'],item['origin']['raw_file'],item['origin']['sha256'])
         current.clear();current.update(item)
     c.update_lesson(directory,update)
     return describe(c.read(directory/'lesson.json')['resources'])

@@ -12,7 +12,7 @@ from model_readiness import inspect_model, model_lock
 from source_integrity import file_hash, source_matches, evidence_hashes, verify_evidence, verification_session
 from storage_lock import file_lock
 from screen_evidence import extract_frames
-from media_input import PIPELINE_VERSION, probe_media, extract_audio
+from media_input import PIPELINE_VERSION, probe_media, extract_audio, timeline_end
 
 MANAGED = ('audio.wav', 'frames', 'manifest.json', 'transcript.json', 'transcript.md',
            'tutor_packet.json', 'tutor_context.md', 'TUTOR_RULES.md', 'visual_notes.json', 'progress.json')
@@ -108,9 +108,9 @@ def process(args, ffmpeg, out, report=lambda stage, **details: None):
         state['media'] = probe_media(args.video)
         persist(out, state)
     media = state['media']
-    duration = min(args.duration, media['video']['end'] - args.start)
+    duration = min(args.duration, timeline_end(media) - args.start)
     if duration <= 0:
-        raise ValueError('No video in requested interval')
+        raise ValueError('No audio/video in requested interval')
     from resource_preflight import inspect as inspect_resources, enforce
     recognition_needed = not args.prepare_only and 'recognition' not in stages
     pending = any(name not in stages for name in ('audio', 'frames')) or (
@@ -141,8 +141,9 @@ def process(args, ffmpeg, out, report=lambda stage, **details: None):
             shutil.rmtree(staging)
         staging.mkdir()
         print('Extracting screen frames…', flush=True)
-        with nullcontext():
-            frames=extract_frames(args.video,staging,args.start,stages['audio']['duration'],args.frame_every,ffmpeg, **extraction_options)
+        try:
+            frames=(extract_frames(args.video,staging,args.start,stages['audio']['duration'],args.frame_every,ffmpeg,
+                scene_changes=True,**extraction_options) if media.get('video') else [])
             if file_hash(args.video) != checksum:
                 raise ValueError('Video changed during extraction; use a fresh output directory')
             if (out / 'frames').exists():
@@ -150,15 +151,22 @@ def process(args, ffmpeg, out, report=lambda stage, **details: None):
             staging.replace(out / 'frames')
             for frame in frames:
                 frame['file']='frames/'+frame['file']
-            stages['frames'] = dict(items=frames, hashes=evidence_hashes(out, dict(frames=frames)), execution=limits)
+            stages['frames'] = dict(items=frames, hashes=evidence_hashes(out, dict(frames=frames)), execution=limits,
+                selection='scene_or_periodic_v1' if media.get('video') else 'audio_only')
             persist(out, state)
+        finally:
+            if staging.exists():shutil.rmtree(staging)
     metadata = dict(source=args.video.name, source_path=str(args.video.resolve()), source_size=args.video.stat().st_size,
         source_sha256=checksum, source_revision='sha256:' + checksum, start=args.start,
         requested_duration=args.duration, actual_duration=stages['audio']['duration'],
         pipeline_version=PIPELINE_VERSION, media=media, audio_quality=stages['audio']['quality'],
-        extraction=dict(frame_every=args.frame_every), audio_sha256=stages['audio']['sha256'],
+        extraction=dict(frame_every=args.frame_every,frame_selection=stages['frames'].get('selection','legacy_periodic')), audio_sha256=stages['audio']['sha256'],
         frames=stages['frames']['items'], evidence_sha256=dict(stages['frames']['hashes']),
         limitations=['Periodic frames may miss brief code changes.', 'Speech and code require verification.'])
+    if stages['frames'].get('selection')=='scene_or_periodic_v1':
+        metadata['limitations'].append('Scene candidates are pixel changes, not verified slide/code/table interpretations.')
+    if not media.get('video'):
+        metadata['limitations'].append('Audio-only source; no visual evidence.')
     verify_evidence(out, metadata, transcript=False, audio=True)
     if args.prepare_only:
         # A completed recognition must never be downgraded by a prepare-only call.
@@ -202,13 +210,17 @@ def process(args, ffmpeg, out, report=lambda stage, **details: None):
                 from bounded_vad import install as install_bounded_vad
                 install_bounded_vad()
                 segments, info = model.transcribe(audio, initial_prompt=args.prompt or None, language=args.language, vad_filter=True)
-            records = []
-            for segment in segments:
+            records = [];discarded=0
+            from lecture_context import number
+            for segment_index,segment in enumerate(segments,1):
                 limit = metadata['actual_duration']
-                start, end = min(segment.start, limit) + args.start, min(segment.end, limit) + args.start
+                raw_start=number(segment.start,'ASR start');raw_end=number(segment.end,'ASR end')
+                if raw_end<raw_start or not isinstance(segment.text,str):raise ValueError('Invalid ASR segment')
+                start,end=max(0,min(raw_start,limit))+args.start,max(0,min(raw_end,limit))+args.start
                 if end <= start:
+                    discarded+=1
                     continue
-                records.append(dict(start=start, end=end, text=segment.text.strip(),
+                records.append(dict(start=start, end=end, text=segment.text.strip(), asr_segment_index=segment_index,
                     asr_start=segment.start + args.start, asr_end=segment.end + args.start,
                     avg_logprob=segment.avg_logprob, no_speech_prob=segment.no_speech_prob, compression_ratio=segment.compression_ratio))
                 print(f'ASR source time: {end:.2f}', flush=True)
@@ -217,6 +229,7 @@ def process(args, ffmpeg, out, report=lambda stage, **details: None):
             if file_hash(args.video) != checksum:
                 raise ValueError('Video changed during recognition; use a fresh output directory')
             verify_evidence(out, metadata, transcript=False, audio=True)
+            records.sort(key=lambda r:(r['start'],r['end']))
             atomic_json(out / 'transcript.json', records)
             atomic_text(out / 'transcript.md', '# Автоматическое распознавание; требует проверки\n\n' +
                         '\n\n'.join(f'[{r["start"]:.2f}–{r["end"]:.2f}] {r["text"]}' for r in records))
@@ -224,12 +237,16 @@ def process(args, ffmpeg, out, report=lambda stage, **details: None):
                 info=dict(model=str(model_path), language=info.language, segments=len(records),
                           feature_extraction='bounded_logmel_v1', vad_batch_frames=512,
                           speech_collection='linear_if_32_chunks_v1',
+                          discarded_zero_or_outside_segments=discarded,
                           cpu_mode=limits['mode'], cpu_threads=limits['asr_threads']))
             persist(out, state)
     metadata['recognition'] = stages['recognition']['info']
     if not metadata['recognition']['segments']:
         metadata['audio_quality'] = dict(metadata['audio_quality'],
             warnings=metadata['audio_quality']['warnings'] + ['no_speech_recognized_requires_review'])
+    if metadata['recognition'].get('discarded_zero_or_outside_segments'):
+        metadata['audio_quality']=dict(metadata['audio_quality'],
+            warnings=metadata['audio_quality']['warnings']+['asr_segments_outside_coverage_require_review'])
     metadata['run_settings'] = stages['recognition']['settings']
     metadata['evidence_sha256']['transcript.json'] = stages['recognition']['sha256']
     verify_evidence(out, metadata, audio=True)
