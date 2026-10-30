@@ -8,6 +8,8 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
 import setup_local
+import bootstrap
+from storage_lock import locked_stream
 
 
 class RuntimeRepair(unittest.TestCase):
@@ -26,6 +28,94 @@ class RuntimeRepair(unittest.TestCase):
         self.target.mkdir()
         (self.target / 'pyvenv.cfg').write_text('home = missing-python\nversion = 3.11.9\n')
         (self.target / 'old-extension.pyd').write_bytes(b'old ABI')
+
+    def test_bootstrap_upgrade_uses_locked_staging_and_preserves_course_on_failure(self):
+        for fail in (False, True):
+            with self.subTest(install_fails=fail):
+                home = bootstrap.initialize(self.root / ('данные курса-' + str(fail)))
+                runtime = home / 'runtime'; runtime.mkdir()
+                self.target = runtime / 'venv'; self.old()
+                python = bootstrap.runtime_python(home)
+                python.parent.mkdir(); python.write_bytes(b'old Python fixture')
+                course = home / 'courses/default'; course.mkdir(parents=True)
+                progress = course / 'progress.json'; progress.write_bytes(b'preserve user data')
+                def run(command, **kwargs):
+                    if 'pip' in command:
+                        self.assertIsNotNone(locked_stream(runtime / '.setup.lock'))
+                        self.assertEqual(python.read_bytes(), b'old Python fixture')
+                        if fail: raise subprocess.CalledProcessError(1, command)
+                    elif Path(command[0]).is_relative_to(self.target) and (self.target / 'old-extension.pyd').exists():
+                        raise subprocess.CalledProcessError(1, command, stderr=b'missing pdfplumber')
+                def dispatch(command, **kwargs):
+                    if str(command[2]).endswith('setup_local.py'):
+                        with patch.object(sys, 'argv', command[2:]): setup_local.main()
+                    else: run(command, **kwargs)
+                with patch.object(setup_local.venv, 'EnvBuilder') as builder, \
+                        patch.object(setup_local.subprocess, 'run', side_effect=run), \
+                        patch.dict(os.environ, {'DOSUTI_HOME': str(home)}):
+                    builder.return_value.create.side_effect = self.create
+                    if fail:
+                        with self.assertRaisesRegex(ValueError, 'setup failed'):
+                            bootstrap.prepare(home, runner=dispatch)
+                        self.assertEqual(python.read_bytes(), b'old Python fixture')
+                        self.assertFalse(list(runtime.glob('venv-staging-*')))
+                    else:
+                        self.assertTrue(bootstrap.prepare(home, runner=dispatch)['verified'])
+                        self.assertTrue(bootstrap.prepare(home, runner=dispatch)['verified'])
+                        builder.return_value.create.assert_called_once()
+                        self.assertTrue(any((p / 'old-extension.pyd').exists()
+                                            for p in runtime.glob('venv-previous-*')))
+                self.assertEqual(progress.read_bytes(), b'preserve user data')
+
+    def test_if_needed_rechecks_inside_installer_without_reinstalling(self):
+        self.create(self.target)
+        before = (self.target / 'pyvenv.cfg').read_bytes()
+        with patch.object(setup_local.venv, 'EnvBuilder') as builder, \
+                patch.object(setup_local.subprocess, 'run') as runner:
+            python = setup_local.install(self.root, if_needed=True)
+        builder.assert_not_called()
+        self.assertEqual(runner.call_count, 1)
+        self.assertEqual(Path(runner.call_args.args[0][0]), python)
+        self.assertEqual((self.target / 'pyvenv.cfg').read_bytes(), before)
+        self.assertFalse(list(self.root.glob('venv-previous-*')))
+
+    def test_if_needed_upgrades_outdated_environment_and_preserves_backup(self):
+        self.old()
+        def run(command, **kwargs):
+            if '-c' in command and Path(command[0]).is_relative_to(self.target) \
+                    and (self.target / 'old-extension.pyd').exists():
+                raise subprocess.CalledProcessError(1, command, stderr=b'missing pdfplumber')
+        with patch.object(setup_local.venv, 'EnvBuilder') as builder, \
+                patch.object(setup_local.subprocess, 'run', side_effect=run):
+            builder.return_value.create.side_effect = self.create
+            setup_local.install(self.root, if_needed=True)
+        self.assertFalse((self.target / 'old-extension.pyd').exists())
+        backup, = self.root.glob('venv-previous-*')
+        self.assertEqual((backup / 'old-extension.pyd').read_bytes(), b'old ABI')
+
+    def test_failed_automatic_upgrade_keeps_old_environment_then_retry_works(self):
+        self.old()
+        before = {p.name: p.read_bytes() for p in self.target.iterdir()}
+        def run(command, **kwargs):
+            if 'pip' in command or (Path(command[0]).is_relative_to(self.target)
+                                    and (self.target / 'old-extension.pyd').exists()):
+                raise subprocess.CalledProcessError(1, command)
+        with patch.object(setup_local.venv, 'EnvBuilder') as builder, \
+                patch.object(setup_local.subprocess, 'run', side_effect=run):
+            builder.return_value.create.side_effect = self.create
+            with self.assertRaises(subprocess.CalledProcessError):
+                setup_local.install(self.root, if_needed=True)
+        self.assertEqual({p.name: p.read_bytes() for p in self.target.iterdir()}, before)
+        self.assertFalse(list(self.root.glob('venv-staging-*')))
+        with patch.object(setup_local.venv, 'EnvBuilder') as builder, \
+                patch.object(setup_local.subprocess, 'run'):
+            builder.return_value.create.side_effect = self.create
+            setup_local.install(self.root, if_needed=True)
+            builder.return_value.create.assert_called_once()
+        self.assertFalse((self.target / 'old-extension.pyd').exists())
+        self.assertTrue(any((p / 'old-extension.pyd').exists()
+                            for p in self.root.glob('venv-previous-*')))
+
 
     def test_replaces_environment_for_missing_or_different_base(self):
         self.old()

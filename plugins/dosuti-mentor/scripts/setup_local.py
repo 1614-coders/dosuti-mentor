@@ -12,13 +12,20 @@ from storage_lock import file_lock
 from bootstrap import verify_python
 
 
-def install(runtime):
+def install(runtime, *, if_needed=False):
     target = safe(runtime / 'venv')
     if Path(sys.prefix).resolve() == target:
         raise ValueError('Run repair with the base Python, outside this venv')
     if target.exists():
         config = safe(target / 'pyvenv.cfg')
         if not config.is_file(): raise ValueError('Unknown venv folder; preserve it before repair')
+        if if_needed:
+            python = target / ('Scripts/python.exe' if sys.platform == 'win32' else 'bin/python')
+            try:
+                verify_python(python, runner=subprocess.run)
+                return python
+            except (ValueError, subprocess.CalledProcessError):
+                pass
     staging = safe(runtime / ('venv-staging-' + uuid.uuid4().hex))
     backup = None
     prepared = False
@@ -55,6 +62,7 @@ def install(runtime):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--runtime', type=Path, required=True)
+    parser.add_argument('--if-needed', action='store_true', help='Keep a compatible existing environment')
     args = parser.parse_args()
     if sys.version_info < (3, 11):
         parser.error('Python 3.11 or newer is required; Python 3.12 is the tested version')
@@ -62,7 +70,7 @@ def main():
     home = find_home(runtime) or initialize(runtime, legacy_runtime=True)
     from heavy_work import slot
     with session(home), slot(home), file_lock(runtime / '.setup.lock'):
-        python = install(runtime)
+        python = install(runtime, if_needed=args.if_needed)
     print('Local runtime ready:', python)
 
 

@@ -5,6 +5,7 @@ WINDOWS_MODULES = (
     'test_platform_diagnostics',
     'test_history_read_only',
     'test_runtime_repair',
+    'test_bootstrap',
     'test_python_probe',
     'test_import_rollback',
     'test_practice_reuse',

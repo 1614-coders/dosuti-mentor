@@ -17,8 +17,11 @@ python3 PLUGIN_ROOT/scripts/bootstrap.py --home DATA_ROOT
 
 После этого используй DATA_ROOT/runtime/venv/bin/python; на Windows —
 DATA_ROOT/runtime/venv/Scripts/python.exe. Повторный запуск проверяет готовую среду
-без пересборки; неисправную сохраняет до явного ремонта. bootstrap.py --verify
-проверяет приватный Python, импорты и FFmpeg без установки. Windows-установщик
+без пересборки; несовместимые зависимости обновляет через staging с блокировкой
+и откатом. Неизвестная папка или незавершённая среда требуют отдельного ремонта.
+bootstrap.py --verify проверяет приватный Python, версии пакетов, импорты и FFmpeg
+без установки. Перед обновлением нужна копия данных; порядок восстановления —
+в [installation.md](installation.md). Windows-установщик
 поставляется внутри PLUGIN_ROOT/scripts/Install-DoSuti.ps1.
 
 При явном start-learning без выбранного курса:

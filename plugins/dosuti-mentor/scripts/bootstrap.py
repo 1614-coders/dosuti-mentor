@@ -58,12 +58,22 @@ def verify_python(python, runner=subprocess.run):
     """Check a newly prepared interpreter, including before its directory is published."""
     if not python.is_file():
         raise ValueError('Private Python is unavailable; complete technical setup before learning')
+    requirements = Path(__file__).with_name('requirements.txt').read_text(encoding='utf-8').splitlines()
     code = '''import sys, subprocess
+from importlib.metadata import version
+from packaging.requirements import Requirement
 assert (3, 11) <= sys.version_info[:2] <= (3, 12)
-import av, certifi, faster_whisper, PIL, yt_dlp, imageio_ffmpeg
+for line in REQUIREMENTS:
+    if not line.strip() or line.lstrip().startswith('#'): continue
+    requirement = Requirement(line)
+    if requirement.marker is None or requirement.marker.evaluate():
+        installed = version(requirement.name)
+        if not requirement.specifier.contains(installed):
+            raise RuntimeError(f'Incompatible dependency: {requirement}; installed {installed}')
+import av, certifi, faster_whisper, PIL, yt_dlp, imageio_ffmpeg, pdfplumber, pypdfium2
 subprocess.run([imageio_ffmpeg.get_ffmpeg_exe(), '-version'], check=True,
                stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=15)
-'''
+'''.replace('REQUIREMENTS', repr(requirements))
     runner([str(python), '-I', '-B', '-c', code], check=True, capture_output=True, timeout=60)
 
 
@@ -72,12 +82,19 @@ def prepare(home, runner=subprocess.run):
     python = runtime_python(home)
     home = initialize(safe(home))
     if python.is_file():
-        return verify(home, runner=runner)
-    if python.parent.parent.exists():
+        try:
+            return verify(home, runner=runner)
+        except subprocess.CalledProcessError:
+            pass  # Rebuild an outdated environment through the locked staging installer.
+    elif python.parent.parent.exists():
         raise ValueError('Existing runtime is incomplete; preserve it before explicit repair')
     env = dict(os.environ, DOSUTI_HOME=str(home))
-    runner([sys.executable, '-B', str(Path(__file__).with_name('setup_local.py')),
-            '--runtime', str(home / 'runtime')], env=env, check=True)
+    try:
+        runner([sys.executable, '-B', str(Path(__file__).with_name('setup_local.py')),
+                '--runtime', str(home / 'runtime'), '--if-needed'], env=env, check=True)
+    except subprocess.CalledProcessError as error:
+        raise ValueError('Runtime setup failed; previous environment or recovery backup is preserved. '
+                         'Check installation errors and retry; runtime is not verified.') from error
     return verify(home, runner=runner)
 
 
