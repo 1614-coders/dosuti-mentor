@@ -28,6 +28,7 @@ WINDOWS_MODULES = (
     'test_visual_materials',
     'test_quality_optimization',
     'test_source_library',
+    'test_library_lesson',
     'test_context',
     'test_onboarding_hierarchy',
     'test_lesson_presentation',

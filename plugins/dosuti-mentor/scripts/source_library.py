@@ -193,8 +193,19 @@ def main():
     parser.add_argument('--library',type=Path);parser.add_argument('--direction');parser.add_argument('--topic')
     parser.add_argument('--level',choices=list(LEVELS));parser.add_argument('--language',choices=['RU','EN','DE','FR','JA'])
     parser.add_argument('--entries',nargs='+')
+    parser.add_argument('--lesson-request',type=Path,help='Bounded mentor fit/learner-context JSON; return a lesson brief only')
     args=parser.parse_args()
-    try:result=search(args.library,direction=args.direction,topic=args.topic,level=args.level,language=args.language,entries=args.entries)
+    try:
+        request=None
+        if args.lesson_request:
+            from library_lesson import read_request,lesson_brief
+            request=read_request(args.lesson_request)
+        reviews=request['reviews'] if request else []
+        needed=[r['entry_id'] for r in reviews if r['verdict']!='unsuitable']
+        entries=args.entries or (needed[:2] if needed else None)
+        skip=request and (request['learner_materials_sufficient'] or (reviews and not needed))
+        selection=None if skip else search(args.library,direction=args.direction,topic=args.topic,level=args.level,language=args.language,entries=entries)
+        result=lesson_brief(selection,request) if request is not None else selection
     except (OSError,ValueError,KeyError,BadZipFile) as error:parser.exit(2,str(error)+'\n')
     print(json.dumps(result,ensure_ascii=False,separators=(',',':')))
 
