@@ -816,6 +816,7 @@ def main():
             command.add_argument('--history-before',type=int,help='Read an older history page; exclusive revision bound')
         if name in ['status', 'progress', 'bind', 'context', 'history', 'settings', 'resume', 'intent', 'diagnostic', 'learn-unit', 'study-next', 'career-route', 'cleanup-progress']:
             command.add_argument('--profile', default='default')
+            command.add_argument('--learner-home', type=Path, help='Explicit managed home for general learner preferences')
         if name in ['status','context','resume','intent','diagnostic','learn-unit','study-next','career-route']:
             command.add_argument('--session',help='Stable ID for this learning session/chat task')
         if name in ['status', 'context', 'settings', 'learn-unit']:
@@ -917,7 +918,11 @@ def main():
             command.add_argument('--expected-revision')
             command.add_argument('--notes')
         elif name == 'settings':
-            command.add_argument('--scope', choices=['profile','course'], default='profile')
+            command.add_argument('--restart-onboarding', action='store_true')
+            command.add_argument('--course-settings', choices=['keep', 'change'])
+            command.add_argument('--setting-question', action='append')
+            command.add_argument('--expected-revision', type=int)
+            command.add_argument('--scope', choices=['profile','course','learner'], default='profile')
             command.add_argument('--set', action='append', default=[])
             command.add_argument('--reset', action='store_true')
             command.add_argument('--onboarding', choices=['in_progress','complete','skipped'])

@@ -9,7 +9,7 @@ from storage_lock import file_lock
 DEFAULTS = dict(style='teacher', format='steps', level='beginner', detail='balanced', checks='adaptive')
 CHOICES = dict(style=('teacher','partner','reviewer'), format=('steps','blocks','file'),
                level=('beginner','intermediate','advanced'), detail=('concise','balanced','detailed'),
-               checks=('adaptive','each_block','end','on_request'))
+               checks=('adaptive','each_block','end','on_request'), communication_language=None)
 ONBOARDING_STATES = ('not_asked','in_progress','complete','skipped')
 ONBOARDING_QUESTIONS = dict(
     outcome=('topics','skill','course','profession','growth','undecided'),
@@ -141,6 +141,10 @@ def validate_preferences(value):
     if not isinstance(value,dict) or set(value)-set(CHOICES):
         raise ValueError('Unknown preference; evidence and progress rules cannot be overridden')
     for key, val in value.items():
+        if key == 'communication_language':
+            if not isinstance(val, str) or not val.strip() or len(val) > 80:
+                raise ValueError('Invalid communication language')
+            continue
         if val not in CHOICES[key]:
             raise ValueError('Invalid preference: '+key)
     return value
@@ -161,39 +165,82 @@ def preferences(args):
         values = validate_preferences(data.get('values',{}))
         result.update(values); layers[scope] = dict(values=values,path=str(path),revision=revision(data))
         if scope=='profile':
+            setup = data.get('course_setup')
+            local_answers = dict(data.get('onboarding_answers', {}))
+            restart = data.get('onboarding_restart', False)
             onboarding = data.get('onboarding','not_asked')
             answers = onboarding_answers(data.get('onboarding_answers',{}))
             comment = onboarding_comment(data.get('onboarding_comment',''))
             if onboarding not in ONBOARDING_STATES:
                 raise ValueError('Invalid onboarding state')
-    checks_source=next((scope for scope in ('course','profile') if 'checks' in layers[scope]['values']),'default')
+    from learner_preferences import read as read_shared, course_setup, COURSE_QUESTIONS
+    setup = course_setup(setup)
+    shared_path, shared = read_shared(args)
+    if type(restart) is not bool: raise ValueError('Invalid onboarding restart flag')
+    if shared:
+        from learner_preferences import GENERAL
+        result = dict(DEFAULTS) | {k: v for k, v in layers['profile']['values'].items() if k not in GENERAL}
+        result.update(shared.get('values', {}))
+        layers['learner'] = dict(values=shared.get('values', {}), path=str(shared_path), revision=revision(shared))
+        if setup: result.update(layers['profile']['values'])
+        result.update(layers['course']['values'])
+    shared_finished = shared.get('onboarding') in ('complete', 'skipped') and not restart
+    if shared_finished:
+        answers = (shared.get('onboarding_answers', {}) | answers if setup else answers | shared.get('onboarding_answers', {}))
+        onboarding = shared['onboarding']
+    checks_source=next((scope for scope in (('course','profile','learner') if setup else ('course','learner','profile')) if scope in layers and not (shared and scope == 'profile' and not setup) and 'checks' in layers[scope]['values']),'default')
     record=answers.get('check_frequency',{});selected=record.get('value')
     if isinstance(selected,list) and len(selected)==1:selected=selected[0]
     checks_unresolved=False
-    if checks_source=='default' and record.get('status') in ('answered','clarifying'):
+    if (checks_source=='default' or (setup and 'checks' not in layers['profile']['values'] and 'checks' not in layers['course']['values'])) and record.get('status') in ('answered','clarifying'):
         if record['status']=='answered' and isinstance(selected,str) and selected in CHOICES['checks']:
             result['checks']=selected;checks_source='onboarding'
         else:checks_unresolved=True
     pending = [q for q in ONBOARDING_QUESTIONS if answers.get(q,{}).get('status')=='clarifying'
                 or (onboarding not in ('complete','skipped') and q not in answers)]
-    return dict(effective=result,layers=layers,checks_source=checks_source,checks_unresolved=checks_unresolved,onboarding=onboarding,
+    mode = 'full'
+    if shared_finished:
+        pending = [q for q in ('subject', 'outcome') if answers.get(q, {}).get('status') not in ('answered', 'skipped')]
+        mode = 'project' if pending else 'ready'
+    if setup and not restart:
+        pending = [q for q in COURSE_QUESTIONS if local_answers.get(q, {}).get('status') not in ('answered', 'skipped')]
+        if pending: mode = 'course_intro'
+        elif setup['settings'] == 'pending': mode = 'course_preferences'
+        elif setup['settings'] == 'keep': mode = 'ready'
+        else:
+            pending = list(setup['pending'])
+            mode = 'course_settings' if pending else 'ready'
+    message = onboarding_message('in_progress' if setup else onboarding,answers,pending[0] if pending else None)
+    if mode == 'course_preferences':
+        message = 'Оставим твои прежние настройки обучения или хочешь их изменить для нового курса?'
+    if mode == 'project':
+        message = ('Начинаем новый проект! Что будем изучать?' if 'subject' in pending
+                   else 'Какого результата ты хочешь достичь в этом проекте?')
+    return dict(onboarding_mode=mode,course_setup=setup,course_settings_choices=['Оставить прежние.', 'Изменить настройки.'] if mode=='course_preferences' else [],effective=result,layers=layers,checks_source=checks_source,checks_unresolved=checks_unresolved,onboarding=onboarding,
                 onboarding_answers=answers,onboarding_comment=comment,
                 onboarding_pending=pending,onboarding_next=pending[0] if pending else None,
-                onboarding_message=onboarding_message(onboarding,answers,pending[0] if pending else None))
+                onboarding_message=message)
 
 
 def settings(args):
     update_file = getattr(args,'onboarding_file',None)
     skips = getattr(args,'onboarding_skip',[]) or []
-    if args.set or args.reset or args.onboarding or update_file or skips:
-        path = pref_file(args,args.scope)
+    restart = getattr(args, 'restart_onboarding', False)
+    course_settings = getattr(args, 'course_settings', None)
+    setting_questions = getattr(args, 'setting_question', None)
+    if args.set or args.reset or args.onboarding or update_file or skips or restart or course_settings or setting_questions:
+        from learner_preferences import read as read_shared, publish, GENERAL, course_setup, COURSE_QUESTIONS, SETTING_QUESTIONS
+        shared_path, _ = read_shared(args)  # Validate before changing local preferences.
+        if args.scope == 'learner' and shared_path is None:
+            raise ValueError('No managed learner home selected')
+        path = pref_file(args, 'profile' if args.scope == 'learner' else args.scope)
         updates = {}
         for item in args.set:
             key,sep,val = item.partition('=')
             if not sep:raise ValueError('Use --set key=value')
             updates[key]=val
         validate_preferences(updates)
-        if (args.onboarding or update_file or skips) and args.scope!='profile':
+        if (args.onboarding or update_file or skips or restart or course_settings or setting_questions) and args.scope!='profile':
             raise ValueError('Onboarding belongs to the profile')
         update = read_json(update_file) if update_file else {}
         if not isinstance(update,dict) or set(update)-{'answers','comment'}:
@@ -211,8 +258,24 @@ def settings(args):
             raise ValueError('Skip all onboarding separately from individual answers')
         if args.onboarding is not None and args.onboarding not in ONBOARDING_STATES:
             raise ValueError('Invalid onboarding state')
+        if args.scope == 'learner':
+            if set(updates) - GENERAL: raise ValueError('Subject level belongs to the project')
+            publish(args, values=updates, reset=args.reset, expected=getattr(args, 'expected_revision', None))
+            return preferences(args)
+        if restart and (args.onboarding or update_file or skips or course_settings or setting_questions):
+            raise ValueError('Restart onboarding separately from answers')
         with file_lock(path.with_suffix('.lock')):
             current = read_json(path,dict(values={},revision=0,onboarding='not_asked'))
+            expected = getattr(args, 'expected_revision', None)
+            if expected is not None and revision(current) != expected:
+                raise ValueError('Preferences changed; read settings before updating')
+            setup = course_setup(current.get('course_setup'))
+            if (course_settings or setting_questions) and not setup: raise ValueError('No new course setup is active')
+            if course_settings not in (None, 'keep', 'change'): raise ValueError('Choose keep or change course settings')
+            if setting_questions and course_settings != 'change': raise ValueError('Select setting questions with change')
+            if restart:
+                setup = None
+                current = dict(current, onboarding='not_asked', onboarding_answers={}, onboarding_restart=True)
             values = {} if args.reset else dict(validate_preferences(current.get('values',{})))
             values.update(updates)
             onboarding = args.onboarding or current.get('onboarding','not_asked')
@@ -235,6 +298,14 @@ def settings(args):
                 additions['subject']=incoming
             answers.update(additions)
             onboarding_answers(answers)
+            if setup:
+                setup = dict(setup)
+                if course_settings:
+                    if any(answers.get(q, {}).get('status') not in ('answered', 'skipped') for q in COURSE_QUESTIONS):
+                        raise ValueError('Complete course questions before choosing its settings')
+                    selected = list(setting_questions or SETTING_QUESTIONS) if course_settings=='change' else []
+                    setup = course_setup(dict(settings=course_settings, questions=selected, pending=selected))
+                setup['pending'] = [q for q in setup['pending'] if q not in additions or additions[q]['status']=='clarifying']
             if args.onboarding=='skipped':
                 for question in ONBOARDING_QUESTIONS:
                     answers.setdefault(question,dict(status='skipped'))
@@ -249,10 +320,15 @@ def settings(args):
                 raise ValueError('Cannot complete unresolved onboarding questions')
             if 'comment' in update:comment=update['comment']
             saved=dict(values=values,revision=revision(current)+1,onboarding=onboarding)
+            if setup: saved['course_setup'] = setup
+            if current.get('onboarding_restart') and onboarding not in ('complete', 'skipped'):
+                saved['onboarding_restart'] = True
             if answers:saved['onboarding_answers']=answers
             if comment or 'onboarding_comment' in current or 'comment' in update:
                 saved['onboarding_comment']=comment
             atomic_json(path,saved)
+            if args.scope == 'profile' and not restart and not setup:
+                publish(args, values=updates, answers=additions, finished=onboarding, reset=args.reset)
     return preferences(args)
 
 

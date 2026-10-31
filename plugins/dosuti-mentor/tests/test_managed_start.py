@@ -56,7 +56,7 @@ class ManagedStart(unittest.TestCase):
         self.assertFalse((root / 'learners/default/diagnostic-learning.json').exists())
         self.assertFalse((root / 'learners/default/learning-intent.json').exists())
 
-    def test_repeat_and_other_project_reuse_saved_answers_without_overwrite(self):
+    def test_repeat_reuses_course_but_new_project_is_isolated(self):
         first = self.start(); root = Path(first['binding']['course_path'])
         learning_tools.settings(NS(course=root, profile='default', scope='profile',
             set=['detail=detailed'], reset=False, onboarding='in_progress'))
@@ -65,8 +65,8 @@ class ManagedStart(unittest.TestCase):
             set=[], reset=False, onboarding=None, onboarding_file=payload))
         before = self.files(root)
         other = self.base / 'другой проект'; other.mkdir()
-        self.assertEqual(self.start(chat='chat-b')['binding'], first['binding'])
-        self.assertEqual(self.start(other, 'chat-c')['binding'], first['binding'])
+        self.assertEqual(self.start(chat='chat-b')['start_action'], 'choose_course')
+        self.assertEqual(self.start(other, 'chat-c')['start_action'], 'choose_course')
         self.assertEqual(self.files(root), before)
         self.assertEqual(list(other.iterdir()), [])
 
@@ -82,9 +82,10 @@ class ManagedStart(unittest.TestCase):
         cli('course.py', 'settings', '--course', root, '--profile', 'default', '--onboarding', 'in_progress')
         before = self.files(self.home); project_before = self.files(self.project)
         other = cli('learning_start.py', '--project', self.project, '--chat', 'chat-b', '--home', self.home)
-        prefs = cli('course.py', 'settings', '--course', other['binding']['course_path'], '--profile', 'default')
+        self.assertEqual(other['start_action'], 'choose_course')
+        prefs = cli('course.py', 'settings', '--course', root, '--profile', 'default')
         self.assertEqual(prefs['onboarding'], 'in_progress')
-        self.assertEqual(other['binding'], first['binding'])
+        self.assertIsNone(other['binding'])
         self.assertEqual(self.files(self.home), before)
         self.assertEqual(self.files(self.project), project_before)
 
@@ -120,7 +121,8 @@ class ManagedStart(unittest.TestCase):
         folder = self.home / 'courses/default'; folder.mkdir(parents=True)
         (folder / 'keep.txt').write_text('external')
         before = self.files(self.home)
-        with self.assertRaises(ValueError): self.start()
+        import learning_start
+        with self.assertRaises(ValueError): learning_start.start(None, 'chat-a', self.home)
         self.assertEqual((folder / 'keep.txt').read_text(), 'external')
         self.assertFalse((folder / 'course.json').exists())
 
@@ -139,7 +141,8 @@ class ManagedStart(unittest.TestCase):
         from concurrent.futures import ThreadPoolExecutor
         with ThreadPoolExecutor(max_workers=2) as pool:
             rows = list(pool.map(lambda chat: self.start(chat=chat), ['chat-a', 'chat-b']))
-        self.assertEqual(rows[0]['binding'], rows[1]['binding'])
+        self.assertEqual(sum(row.get('binding') is not None for row in rows), 1)
+        self.assertEqual(sum(row.get('start_action') == 'choose_course' for row in rows), 1)
         self.assertEqual(len(list((self.home / 'courses').iterdir())), 1)
 
     def test_connection_changed_during_creation_is_not_overwritten(self):
