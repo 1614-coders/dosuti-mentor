@@ -90,7 +90,7 @@ def attach_material(args):
     raw,origin=acquire(directory,args.source)
     target=raw
     if args.kind=='homework':
-        value,method=text_content(raw,origin['media_type']);target=reserve(raw.parent/('extracted-'+uuid.uuid4().hex+'.txt'));target.write_text(value,encoding='utf-8');origin['extraction']=method
+        value,method=text_content(raw,origin['media_type']);target=reserve(raw.parent/('extracted-'+uuid.uuid4().hex+'.txt'));target.write_text(value,encoding='utf-8',newline='');origin['extraction']=method
     elif not zipfile.is_zipfile(raw):
         with raw.open('rb') as stream:signature=stream.read(5)
         if signature==b'%PDF-' or 'pdf' in origin['media_type'].lower() or raw.suffix.lower()=='.pdf':
@@ -170,7 +170,7 @@ def _resource(args):
                 if integrity(item['extracted_file'],item['text_sha256'])!='verified':raise ValueError('Extracted text changed; attach a new trusted version')
             else:
                 value,method=text_content(raw,origin.get('media_type',''))
-                target=reserve(raw.parent/('text-'+uuid.uuid4().hex+'.txt'));target.write_text(value,encoding='utf-8');target.chmod(target.stat().st_mode & ~0o222)
+                target=reserve(raw.parent/('text-'+uuid.uuid4().hex+'.txt'));target.write_text(value,encoding='utf-8',newline='');target.chmod(target.stat().st_mode & ~0o222)
                 item.update(extracted_file=str(target.resolve()),text_sha256=file_hash(target),extraction=method,status='extracted_not_reviewed')
             if getattr(args,'visual_pages',None) is not None:
                 if item.get('extraction')!='pdf_text_layer_v1':raise ValueError('Page images require a PDF resource')
