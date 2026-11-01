@@ -36,7 +36,9 @@ jobs:
         run: |
           python -m pip install --only-binary=:all: -r plugins/dosuti-mentor/scripts/requirements.txt
       - name: Run full test suite
-        run: python -B -m unittest discover -s plugins/dosuti-mentor/tests -v
+        run: |
+          python -c "import sys; assert sys.platform == 'linux', sys.platform"
+          python -B -m unittest discover -s plugins/dosuti-mentor/tests -v
 
   windows:
     name: Windows / runtime and onboarding
@@ -61,9 +63,15 @@ jobs:
         working-directory: plugins/dosuti-mentor/tests
         run: |
           $ErrorActionPreference = 'Stop'
+          if ($PSVersionTable.PSVersion.Major -ne 7) { throw 'PowerShell 7 required' }
+          $tempRoot = [System.IO.Path]::GetPathRoot([System.IO.Path]::GetTempPath())
+          $format = ([System.IO.DriveInfo]::new($tempRoot)).DriveFormat
+          Write-Host "Test temp filesystem: $format"
+          if ($format -ne 'NTFS') { throw 'Windows regression tests require NTFS temp storage' }
           $env:DOSUTI_TEST_PWSH = (Get-Command pwsh -CommandType Application).Source
           Get-Command tar, tar.exe | Format-Table CommandType, Name, Source
           python -B -m unittest -v windows_test_suite
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Reproduce first-install races on PowerShell 7
         if: ${{ !cancelled() }}
         working-directory: plugins/dosuti-mentor/tests
@@ -72,6 +80,7 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $env:DOSUTI_TEST_PWSH = (Get-Command pwsh -CommandType Application).Source
           python -B test_windows_install_race.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Reproduce first-install races on Windows PowerShell 5.1
         if: ${{ !cancelled() }}
         working-directory: plugins/dosuti-mentor/tests
@@ -82,6 +91,7 @@ jobs:
           $ErrorActionPreference = 'Stop'
           if (-not (Test-Path -LiteralPath $env:DOSUTI_TEST_PWSH)) { throw 'Windows PowerShell 5.1 unavailable' }
           python -B test_windows_install_race.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Run Windows PowerShell 5.1 checks
         if: ${{ !cancelled() }}
         working-directory: plugins/dosuti-mentor/tests
@@ -89,5 +99,8 @@ jobs:
         env:
           DOSUTI_TEST_PWSH: C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe
         run: |
+          $ErrorActionPreference = 'Stop'
+          if ($PSVersionTable.PSVersion.Major -ne 5 -or $PSVersionTable.PSVersion.Minor -ne 1) { throw 'Windows PowerShell 5.1 required' }
           Get-Command Get-FileHash | Format-Table Name, Source
           python -B -m unittest -v windows_test_suite
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

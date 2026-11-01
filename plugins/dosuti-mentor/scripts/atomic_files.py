@@ -7,7 +7,7 @@ import uuid
 
 
 @contextmanager
-def atomic_writer(path, mode='w', **options):
+def atomic_writer(path, mode='w', *, overwrite=True, **options):
     """Write/flush/close before replacement; caller owns mkdir, encoding and locks."""
     path = Path(path)
     temporary = path.with_name(path.name + '.' + uuid.uuid4().hex + '.tmp')
@@ -16,7 +16,13 @@ def atomic_writer(path, mode='w', **options):
             yield stream
             stream.flush()
             os.fsync(stream.fileno())
-        temporary.replace(path)
+        if overwrite:
+            temporary.replace(path)
+        else:
+            # Publish a fully flushed inode only if no directory entry exists.
+            # Racing ordinary replace-writers therefore always keep their data.
+            try: os.link(temporary, path)
+            except FileExistsError: pass
     finally:
         temporary.unlink(missing_ok=True)
 
@@ -30,6 +36,15 @@ def atomic_text(path, text):
 
 def atomic_json(path, value):
     atomic_text(path, json.dumps(value, ensure_ascii=False, indent=2, allow_nan=False))
+
+
+def atomic_json_if_absent(path, value):
+    """Create a complete default; never replace a concurrent writer's commit."""
+    text = json.dumps(value, ensure_ascii=False, indent=2, allow_nan=False)
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with atomic_writer(path, overwrite=False, encoding='utf-8', newline='\n') as stream:
+        stream.write(text)
 
 
 def atomic_bytes(path, raw):

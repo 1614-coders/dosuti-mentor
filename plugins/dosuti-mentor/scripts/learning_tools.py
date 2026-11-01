@@ -73,6 +73,14 @@ def onboarding_record(answer):
     return dict(status='answered',value=answer)
 
 
+def onboarding_checks(record):
+    selected = record.get('value')
+    if isinstance(selected, list) and len(selected) == 1: selected = selected[0]
+    if record.get('status') == 'answered' and isinstance(selected, str) and selected in CHOICES['checks']:
+        return selected
+    return None
+
+
 def onboarding_message(onboarding, answers, next_question):
     if next_question is None:return None
     copy=(Path(__file__).parents[1]/'references/onboarding-dialog.md').read_text(encoding='utf-8')
@@ -189,11 +197,10 @@ def preferences(args):
         answers = (shared.get('onboarding_answers', {}) | answers if setup else answers | shared.get('onboarding_answers', {}))
         onboarding = shared['onboarding']
     checks_source=next((scope for scope in (('course','profile','learner') if setup else ('course','learner','profile')) if scope in layers and not (shared and scope == 'profile' and not setup) and 'checks' in layers[scope]['values']),'default')
-    record=answers.get('check_frequency',{});selected=record.get('value')
-    if isinstance(selected,list) and len(selected)==1:selected=selected[0]
+    record=answers.get('check_frequency',{});selected=onboarding_checks(record)
     checks_unresolved=False
     if (checks_source=='default' or (setup and 'checks' not in layers['profile']['values'] and 'checks' not in layers['course']['values'])) and record.get('status') in ('answered','clarifying'):
-        if record['status']=='answered' and isinstance(selected,str) and selected in CHOICES['checks']:
+        if selected is not None:
             result['checks']=selected;checks_source='onboarding'
         else:checks_unresolved=True
     pending = [q for q in ONBOARDING_QUESTIONS if answers.get(q,{}).get('status')=='clarifying'
@@ -274,10 +281,18 @@ def settings(args):
             if course_settings not in (None, 'keep', 'change'): raise ValueError('Choose keep or change course settings')
             if setting_questions and course_settings != 'change': raise ValueError('Select setting questions with change')
             if restart:
-                setup = None
+                # Keep course-local ownership while restarting all eight questions.
+                if setup:
+                    selected = onboarding_checks(onboarding_answers(current.get('onboarding_answers', {})).get('check_frequency', {}))
+                    if selected is not None:
+                        current = dict(current, values=dict(checks=selected) | current.get('values', {}))
+                    setup = dict(settings='keep', questions=[], pending=[])
                 current = dict(current, onboarding='not_asked', onboarding_answers={}, onboarding_restart=True)
             values = {} if args.reset else dict(validate_preferences(current.get('values',{})))
             values.update(updates)
+            if setup and current.get('onboarding_restart') and 'checks' not in updates:
+                selected = onboarding_checks(additions.get('check_frequency', {}))
+                if selected is not None: values['checks'] = selected
             onboarding = args.onboarding or current.get('onboarding','not_asked')
             if onboarding not in ONBOARDING_STATES:raise ValueError('Invalid onboarding state')
             answers=dict(onboarding_answers(current.get('onboarding_answers',{})))

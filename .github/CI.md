@@ -3,9 +3,17 @@
 `Tests` запускается при push в `develop` и при pull request в `develop` или `main`.
 
 - Linux, Python 3.12: весь существующий набор `unittest discover`.
-- Windows, Python 3.12, PowerShell 7 и Windows PowerShell 5.1: `test_windows_runtime`,
-  `test_windows_onboarding`, `test_platform_diagnostics`. Это проверка поддерживаемых
-  платформенных сценариев, а не весь набор и не живой диалог Codex.
+- Windows, Python 3.12, PowerShell 7 и Windows PowerShell 5.1: один профиль
+  `windows_test_suite`, определённый в `tests/windows_test_suite.py`.
+  В нём также проверяются изоляция профилей и настроек курсов, диагностические
+  перепроверки, извлечение кода, конфликты кадров, конкурентная инициализация
+  progress.json и согласованность manifest. Это поддерживаемый профиль, а не весь
+  набор и не живой диалог Codex. Перед запуском проверяются версия PowerShell и
+  NTFS для временных файлов; отсутствие hard links вызывает отказ теста, не skip.
+- Шесть настоящих гонок первой установки отдельно запускаются на PS 7 и 5.1.
+  На Mac/Linux они пропускаются как требующие Windows. Нативный UF_TRACKED требует
+  macOS; Windows-профиль не включает `test_mac_source_retry`. Портативные проверки
+  hard links находятся в `test_progress_initialization` и выполняются на обеих CI-платформах.
 - Зависимости устанавливаются из существующего `scripts/requirements.txt`.
   Скачивание моделей ASR и проверка педагогического качества не входят в CI.
 

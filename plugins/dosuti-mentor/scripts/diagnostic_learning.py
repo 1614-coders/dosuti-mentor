@@ -281,7 +281,8 @@ def apply(attempts, event, *, new=False):
                     raise ValueError('Structured assessment requires a rubric saved before the answer')
                 if 'assessment' in value:
                     validate_assessment(value['assessment'], value['evidence'], prompt['rubric'])
-                if current.get('selection_policy')=='adaptive_v2':
+                # Validate new choices, not historical choices accepted by an older policy.
+                if new and current.get('selection_policy')=='adaptive_v2':
                     from diagnostic_policy import check_answer
                     check_answer(current,prompt,value)
                 if ('next_competence' in value and value['next_competence'] is not None

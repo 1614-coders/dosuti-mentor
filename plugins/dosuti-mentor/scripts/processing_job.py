@@ -9,13 +9,14 @@ import uuid
 import wave
 from atomic_files import atomic_json, atomic_text
 from model_readiness import inspect_model, model_lock
-from source_integrity import file_hash, source_matches, evidence_hashes, verify_evidence, verification_session
+from source_integrity import file_hash, source_matches, evidence_hashes, verify_evidence, verification_session, SourceDrift
 from storage_lock import file_lock
 from screen_evidence import extract_frames
 from media_input import PIPELINE_VERSION, probe_media, extract_audio, timeline_end
 
 MANAGED = ('audio.wav', 'frames', 'manifest.json', 'transcript.json', 'transcript.md',
            'tutor_packet.json', 'tutor_context.md', 'TUTOR_RULES.md', 'visual_notes.json', 'progress.json')
+USER_FILES = ('progress.json', 'visual_notes.json')
 # Windows st_ctime is creation time, so retain full source rehashes there.
 CACHE_SOURCE_HASHES = os.name != 'nt'
 
@@ -31,6 +32,51 @@ def persist(folder, state):
     atomic_json(folder / 'checkpoint.json', state)
 
 
+def quarantine_attempt(out, preserved):
+    """Keep failed derived files, never adopt them as a new attempt's cache."""
+    from profile_storage import checked
+    checked(out, True); checked(out / '.unverified', True)
+    target = out / '.unverified' / uuid.uuid4().hex
+    target.mkdir(parents=True)
+    names = ('manifest.json', 'tutor_packet.json', 'checkpoint.json', *MANAGED,
+             'audio.staging.wav', '.frames-staging')
+    for name in dict.fromkeys(names):
+        if name in preserved: continue
+        path = out / name
+        if path.exists() or path.is_symlink():
+            checked(path, path.is_dir())
+            path.replace(target / name)
+
+
+def process_with_retry(args, ffmpeg, out, report):
+    from mac_source_retry import capture, retry_proof, require_same
+    before = capture(args.video)
+    # Another chat may create these during preparation; they are never worker cache.
+    preserved = set(USER_FILES)
+    try:
+        return process(args, ffmpeg, out, report)
+    except SourceDrift as error:
+        # The job lock stays at its original inode while its working set is retired.
+        quarantine_attempt(out, preserved)
+        proof = retry_proof(args.video, before, error)
+        if proof is None: raise
+        checksum = error.checksum
+    require_same(args.video, proof, checksum)
+    report('verify')
+    try:
+        state = process(args, ffmpeg, out, report)
+    except SourceDrift:
+        quarantine_attempt(out, preserved)
+        raise
+    try:
+        require_same(args.video, proof, checksum)
+        if state['source_sha256'] != checksum: raise ValueError('Retry source does not match the original attempt')
+    except BaseException:
+        quarantine_attempt(out, preserved)
+        raise
+    return state
+
+
 def run_job(args, ffmpeg):
     out = args.output.resolve()
     out.mkdir(parents=True, exist_ok=True)
@@ -40,7 +86,12 @@ def run_job(args, ffmpeg):
         report = Reporter(out)
         report.set('verify')
         try:
-            state = process(args, ffmpeg, out, report.set)
+            state = process_with_retry(args, ffmpeg, out, report.set)
+            if 'packet' in state['stages']:
+                from tutor_packet import initialize_user_files
+                initialize_user_files(out)
+                state['status'] = 'complete'
+                persist(out, state)
             terminal = ('complete' if state.get('status') == 'complete' else
                         'recognized' if 'recognition' in state['stages'] else 'prepared')
             report.set(terminal, 'complete')
@@ -92,12 +143,13 @@ def process(args, ffmpeg, out, report=lambda stage, **details: None):
             state['media'] = old['media']
             state['stages']['audio'] = dict(sha256=old['audio_sha256'], duration=pcm_duration(out / 'audio.wav'), quality=old['audio_quality'])
             state['stages']['frames'] = dict(items=old['frames'], hashes={f['file']: old['evidence_sha256'][f['file']] for f in old['frames']})
-        elif any((out / name).exists() for name in MANAGED):
+        elif any((out / name).exists() for name in MANAGED if name not in USER_FILES):
             if not args.resume:
                 raise ValueError('Unfinished files without a checkpoint; use --resume to preserve and rebuild them')
             quarantine = out / '.unverified' / uuid.uuid4().hex
             quarantine.mkdir(parents=True)
             for name in MANAGED:
+                if name in USER_FILES: continue
                 if (out / name).exists():
                     (out / name).replace(quarantine / name)
             print('Preserved unverified old files; rebuilding from pinned source', flush=True)
@@ -258,9 +310,8 @@ def process(args, ffmpeg, out, report=lambda stage, **details: None):
         report('packet')
         atomic_json(out / 'manifest.json', metadata)
         from tutor_packet import build_packet
-        build_packet(out)
+        build_packet(out, initialize=False)
         stages['packet'] = dict(sha256=file_hash(out / 'tutor_packet.json'))
     state.pop('last_error', None)
-    state['status'] = 'complete'
     persist(out, state)
     return state

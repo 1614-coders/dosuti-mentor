@@ -23,10 +23,16 @@ def identity(path):
     value=Path(path).stat()
     return (value.st_dev,value.st_ino,value.st_size,value.st_mtime_ns,value.st_ctime_ns)
 
-def drift(path,before,after,stage):
+class SourceDrift(ValueError):
+    """A failed identity check; never permission to accept an uncertain result."""
+
+
+def drift(path,before,after,stage,checksum=None):
     names=('device','inode','size','mtime_ns','ctime_ns')
     changes={name:dict(before=old,after=new) for name,old,new in zip(names,before,after) if old!=new}
-    return ValueError('Source changed during '+stage+': '+json.dumps(dict(file=str(Path(path).absolute()),changes=changes),ensure_ascii=False))
+    error=SourceDrift('Source changed during '+stage+': '+json.dumps(dict(file=str(Path(path).absolute()),changes=changes),ensure_ascii=False))
+    error.path=Path(path).absolute();error.before=before;error.after=after;error.checksum=checksum
+    return error
 
 
 def verification_session(function=None, *, paths=None, rehash=False):
@@ -43,7 +49,7 @@ def verification_session(function=None, *, paths=None, rehash=False):
             result=function(*args,**kwargs)
             for name,(before,checksum) in cache.items():
                 after=identity(name)
-                if after!=before:raise drift(name,before,after,'verification')
+                if after!=before:raise drift(name,before,after,'verification',checksum)
                 if rehash:
                     # Creation-time metadata cannot replace a final byte check.
                     verify_token=_VERIFICATION.set(None)
@@ -63,13 +69,13 @@ def file_hash(path):
     allowed = _HASH_PATHS.get()
     if allowed is not None and name not in allowed: cache = None
     if cache is not None and name in cache:
-        if cache[name][0]!=before:raise drift(path,cache[name][0],before,'verification')
+        if cache[name][0]!=before:raise drift(path,cache[name][0],before,'verification',cache[name][1])
         watch(path)
         return cache[name][1]
     with path.open('rb') as stream:
         checksum=hashlib.file_digest(stream, 'sha256').hexdigest()
     after=identity(path)
-    if after!=before:raise drift(path,before,after,'hashing')
+    if after!=before:raise drift(path,before,after,'hashing',checksum)
     watch(path)
     if cache is not None:cache[name]=(before,checksum)
     return checksum

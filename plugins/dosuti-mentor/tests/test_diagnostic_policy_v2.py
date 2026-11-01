@@ -5,6 +5,7 @@ from pathlib import Path
 import subprocess
 import sys
 import unittest
+from unittest.mock import patch
 import test_diagnostic_assessment as fixtures
 import diagnostic_learning as dl
 
@@ -149,6 +150,79 @@ class DiagnosticPolicyV2(unittest.TestCase):
         self.assertEqual(state['selection_guidance']['priority_competences'],[])
         self.ask('Writing','basic')
         self.assertNotIn('Keys',self.d.read()['summary']['confirmed_knowledge'])
+
+    def skip(self, following, level='basic'):
+        return self.d.save(dict(action='skip',
+            prompt_revision=self.d.read()['current']['pending_prompt']['revision'],
+            next_difficulty=level, next_competence=following,
+            selection_reason='Learner skipped; check another available competence',
+            skip_reason='Return to this question later'))
+
+    def test_skip_does_not_resolve_failed_skill_or_create_an_answer(self):
+        self.accept(competences=['Keys','Writing'],competence_prerequisites={})
+        self.ask();before=self.answer('incorrect',following='Keys',level='basic')
+        self.ask(level='basic');state=self.skip('Writing')
+        self.assertEqual(state['selection_guidance']['recovery'],before['selection_guidance']['recovery'])
+        self.assertEqual(state['current']['answers'],before['current']['answers'])
+        self.assertEqual(len(state['current']['skips']),1)
+        self.assertNotIn('assessment',state['current']['skips'][0])
+        self.assertNotIn('Keys',state['summary']['confirmed_knowledge'])
+        self.ask('Writing','basic')
+
+    def test_nested_recovery_survives_repeated_skips_pause_and_new_process(self):
+        self.accept();self.ask();self.answer();self.ask('Maps');self.answer(following='Service',level='transfer')
+        self.ask('Service','transfer');self.answer('incorrect',following='Maps',level='applied')
+        self.ask('Maps');before=self.answer('incorrect',following='Keys',level='basic')
+        expected=before['selection_guidance']['recovery']
+        self.assertEqual([row['competence'] for row in expected],['Service','Maps'])
+        self.ask('Keys','basic');self.skip('Maps','applied');self.ask('Maps');self.skip('Keys')
+        self.d.save(dict(action='pause'));raw=self.d.path.read_bytes()
+        run=subprocess.run([sys.executable,'-B',str(Path(dl.__file__).with_name('course.py')),
+            'diagnostic','--course',str(self.d.f.a.course),'--profile',self.d.f.a.profile,
+            '--session','another-chat'],capture_output=True,text=True,timeout=20)
+        self.assertEqual(run.returncode,0,run.stderr)
+        restored=json.loads(run.stdout)
+        self.assertEqual(restored['selection_guidance']['recovery'],expected)
+        self.assertEqual(restored['current']['next_competence'],'Keys')
+        self.assertEqual(self.d.path.read_bytes(),raw)
+        self.d.save(dict(action='resume'),session='another-chat');self.ask('Keys','basic')
+        self.reject(lambda:self.answer(following='Maps',level='basic'))
+        self.answer(following='Maps');self.ask('Maps')
+        state=self.answer(following='Service',level='transfer')
+        self.assertEqual([row['competence'] for row in state['selection_guidance']['recovery']],['Service'])
+        self.ask('Service','transfer');state=self.answer(following='Keys')
+        self.assertEqual(state['selection_guidance']['recovery'],[])
+
+    def test_fifteen_question_limit_with_repeated_skips_keeps_unresolved_gap(self):
+        self.accept(competences=['Keys','Writing'],competence_prerequisites={})
+        self.ask();before=self.answer('incorrect',following='Keys',level='basic')
+        name='Keys'
+        for _ in range(14):
+            self.ask(name,'basic');name='Writing' if name=='Keys' else 'Keys'
+            state=self.skip(name)
+            self.assertEqual(state['selection_guidance']['recovery'],before['selection_guidance']['recovery'])
+        self.assertEqual(state['status'],'completed')
+        self.assertEqual(state['current']['question_budget']['asked'],15)
+        self.assertEqual(len(state['current']['answers']),1)
+        self.assertEqual(len(state['current']['skips']),14)
+        self.assertEqual(state['summary']['confirmed_knowledge'],[])
+        self.reject(lambda:self.ask(name,'basic'))
+
+    def test_previously_accepted_answer_after_skip_remains_readable(self):
+        self.accept(competences=['Keys','Writing'],competence_prerequisites={})
+        self.ask();self.answer('incorrect',following='Keys',level='basic')
+        self.ask(level='basic');self.skip('Writing')
+        # The previous policy lost recovery after skip and accepted this choice.
+        with patch('diagnostic_policy.recovery',return_value=[]):
+            self.ask('Writing','basic');self.answer(following='Writing',level='applied')
+        raw=self.d.path.read_bytes()
+        state=self.d.read()
+        self.assertEqual(len(state['current']['answers']),2)
+        self.assertEqual(state['selection_guidance']['recovery'][0]['competence'],'Keys')
+        self.assertEqual(self.d.path.read_bytes(),raw)
+        self.ask('Writing')
+        self.reject(lambda:self.answer(following='Writing',level='transfer'))
+        self.answer(following='Keys',level='transfer')
 
 
 if __name__=='__main__':unittest.main()

@@ -59,13 +59,24 @@ def validate(value):
 
 
 def checked(directory, data, start=None, stop=None):
-    rows = []
+    rows = []; result = []; selected = []
+    fields = ('id','title','start','end','code_sha256','file','screen_file','match','notes','frames')
+    if start is not None:
+        for original in data.get('code_stages', {}).values():
+            try:
+                validate({k: original[k] for k in fields})
+                if original['start'] < stop and original['end'] > start: selected.append(original)
+            except (ValueError, OSError, KeyError, TypeError):
+                pass  # The main pass preserves the existing malformed-stage warning.
     for original in data.get('code_stages', {}).values():
         row = deepcopy(original)
+        in_window = True
         try:
             # Validate stored annotations too; malformed local data must not be trusted.
-            validate({k: row[k] for k in ('id','title','start','end','code_sha256','file','screen_file','match','notes','frames')})
-            if start is not None and not (row['start'] < stop and row['end'] > start):
+            validate({k: row[k] for k in fields})
+            in_window = start is None or (row['start'] < stop and row['end'] > start)
+            if not in_window and not any(row['screen_file'] == other['screen_file']
+                    and row['start'] < other['end'] and row['end'] > other['start'] for other in selected):
                 continue
             if row.get('source_sha256') != data['video'].get('sha256'):
                 raise ValueError('Video identity changed')
@@ -80,13 +91,14 @@ def checked(directory, data, start=None, stop=None):
         row['usable_as_screen_match'] = not row['stale'] and row.get('match') == 'matches'
         row['verification'] = 'assistant_annotation_not_automatic_proof'
         rows.append(row)
+        if in_window: result.append(row)
     for row in rows:
         row['overlapping_stage_ids'] = [other['id'] for other in rows if other is not row
             and not row['stale'] and not other['stale'] and row['screen_file'] == other['screen_file']
             and row['start'] < other['end'] and row['end'] > other['start']]
         if row['overlapping_stage_ids']:
             row['usable_as_screen_match'] = False
-    return rows
+    return result
 
 
 def code_stage(args):

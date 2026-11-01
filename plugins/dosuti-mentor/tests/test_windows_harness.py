@@ -159,6 +159,38 @@ class PowerShellTransport(unittest.TestCase):
 
 
 class WindowsSuiteContract(unittest.TestCase):
+    def test_ci_verifies_native_platform_engines_and_ntfs(self):
+        workflow = (Path(__file__).resolve().parents[3] / '.github/workflows/tests.yml').read_text()
+        self.assertIn("assert sys.platform == 'linux'", workflow)
+        self.assertIn('$PSVersionTable.PSVersion.Major -ne 7', workflow)
+        self.assertIn('$PSVersionTable.PSVersion.Major -ne 5', workflow)
+        self.assertIn('$PSVersionTable.PSVersion.Minor -ne 1', workflow)
+        self.assertIn("$format -ne 'NTFS'", workflow)
+        self.assertIn('DriveFormat', workflow)
+        self.assertEqual(workflow.count('if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }'), 4)
+
+    def test_release_regressions_are_included_and_not_disabled(self):
+        import windows_test_suite as suite
+        required = ('test_p1_profile_isolation', 'test_diagnostic_policy_v2',
+                    'test_html_content', 'test_material_sources', 'test_code_stages',
+                    'test_progress_initialization', 'test_plugin_manifest')
+        for name in required:
+            with self.subTest(module=name): self.assertIn(name, suite.WINDOWS_MODULES)
+        loader = unittest.TestLoader()
+        pending = list(loader.loadTestsFromNames(required))
+        self.assertEqual(loader.errors, [])
+        count = 0
+        while pending:
+            item = pending.pop()
+            if isinstance(item, unittest.TestSuite): pending.extend(item); continue
+            count += 1
+            method = getattr(item, item._testMethodName)
+            self.assertFalse(getattr(item, '__unittest_skip__', False), item.id())
+            self.assertFalse(getattr(method, '__unittest_skip__', False), item.id())
+        self.assertGreater(count, 0)
+        # Real UF_TRACKED/ctime jobs are Darwin-specific; portable hard-link tests are separate.
+        self.assertNotIn('test_mac_source_retry', suite.WINDOWS_MODULES)
+
     def test_both_engines_use_single_profile_and_keep_native_races(self):
         import windows_test_suite as suite
         workflow = (Path(__file__).resolve().parents[3] / '.github/workflows/tests.yml').read_text()

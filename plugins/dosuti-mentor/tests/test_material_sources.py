@@ -78,6 +78,26 @@ class Materials(unittest.TestCase):
     def test_local_resource_pinned_at_attach(self):
         p=self.f.directory/'article.txt';p.write_text('hello');item=self.attach('resources',p)['items'][0];raw=Path(item['origin']['raw_file']);raw.chmod(0o600);raw.write_text('changed')
         with self.assertRaises(ValueError):self.resource('extract',item['id'])
+    def test_plain_resource_keeps_code_whitespace_and_verified_cache(self):
+        text='\n    if ready:\n        work()\n\nExplanation.\n\n'
+        source=self.f.directory/'code-notes.txt';source.write_text(text)
+        item=self.attach('resources',source)['items'][0]
+        extracted=self.resource('extract',item['id'])['items'][0]
+        self.assertEqual(Path(extracted['extracted_file']).read_text(),text)
+        self.assertEqual(source.read_text(),text)
+        self.review(extracted)
+        reused=self.resource('extract',item['id'])['items'][0]
+        self.assertEqual(reused['extracted_file'],extracted['extracted_file'])
+        self.assertEqual(reused['text_sha256'],extracted['text_sha256'])
+        self.assertTrue(reused['review_valid'])
+    def test_text_homework_extraction_preserves_initial_tabs(self):
+        text='\tif ready:\n\t\twork()\n\n'
+        source=self.f.directory/'homework.txt';source.write_text(text)
+        with contextlib.redirect_stdout(io.StringIO()):
+            ms.attach_material(self.args(kind='homework',source=str(source),none=False,ref=None))
+        item=course.read(self.f.lesson/'lesson.json')['homework']
+        self.assertEqual(Path(item['file']).read_text(),text)
+        self.assertEqual(source.read_text(),text)
     def test_transfer_of_course_preserves_resource_paths(self):
         item=self.extract();self.review(item);new=self.f.directory/'moved';shutil.move(self.a.course,new);self.a.course=new;self.f.lesson=new/'lessons/lesson-01'
         state=self.resource()['items'][0];self.assertTrue(state['review_valid']);self.assertTrue(Path(state['extracted_file']).is_relative_to(new))

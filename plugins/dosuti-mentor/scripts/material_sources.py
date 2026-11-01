@@ -42,6 +42,9 @@ def text_content(path,media_type=''):
         from html_content import extract
         value,method=extract(value)
     if not value.strip():raise ValueError('No readable text extracted; login/JavaScript pages may require a local file')
+    if not html:
+        # Only normalize the final line ending; surrounding whitespace may be code.
+        return value.removesuffix('\n').removesuffix('\r')+'\n', method
     return value.strip()+'\n', method
 
 

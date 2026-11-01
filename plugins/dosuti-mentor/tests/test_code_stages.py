@@ -6,6 +6,7 @@ import shutil
 import sys
 from types import SimpleNamespace as NS
 import unittest
+from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]/'scripts'))
 import course
 import code_stages as stages
@@ -90,3 +91,61 @@ class CodeStages(unittest.TestCase):
     def test_video_identity_mismatch_marks_stale(self):
         self.save();data=self.data();data['video']['sha256']='b'*64
         self.assertTrue(stages.checked(self.f.lesson,data)[0]['stale'])
+
+    def pair(self, **kw):
+        self.save(self.value(match='matches'))
+        self.save(self.value(id='second',start=20,end=50,match='matches',
+            frames=[dict(time=40,sha256=course.file_hash(self.folder/'frames/1.jpg'))],**kw))
+
+    def test_narrow_window_preserves_conflict_with_hidden_neighbor(self):
+        self.pair()
+        result=self.f.context(0,15)
+        self.assertEqual([row['id'] for row in result['code_stages']],['first'])
+        row=result['code_stages'][0]
+        self.assertFalse(row['usable_as_screen_match'])
+        self.assertEqual(row['overlapping_stage_ids'],['second'])
+        self.assertIn('ambiguous_code_stages',result['warnings'])
+
+    def test_half_open_boundaries_and_adjacent_frames_do_not_conflict(self):
+        self.save(self.value(match='matches'))
+        self.save(self.value(id='second',start=30,end=60,match='matches',
+            frames=[dict(time=40,sha256=course.file_hash(self.folder/'frames/1.jpg'))]))
+        for start,stop,identity in [(0,10,'first'),(29.9,30,'first'),(30,40,'second'),(40,50,'second')]:
+            with self.subTest(start=start,stop=stop):
+                rows=stages.checked(self.f.lesson,self.data(),start,stop)
+                self.assertEqual([row['id'] for row in rows],[identity])
+                self.assertTrue(rows[0]['usable_as_screen_match'])
+                self.assertEqual(rows[0]['overlapping_stage_ids'],[])
+
+    def test_small_overlap_and_repeated_code_remain_ambiguous(self):
+        self.save(self.value(end=40.001,match='matches'))
+        self.save(self.value(id='second',start=40,end=60,match='matches',
+            frames=[dict(time=40,sha256=course.file_hash(self.folder/'frames/1.jpg'))]))
+        row=stages.checked(self.f.lesson,self.data(),0,15)[0]
+        self.assertFalse(row['usable_as_screen_match'])
+        self.assertEqual(row['overlapping_stage_ids'],['second'])
+
+    def test_different_screen_files_do_not_conflict(self):
+        self.pair(screen_file='other.py')
+        self.assertTrue(stages.checked(self.f.lesson,self.data(),0,15)[0]['usable_as_screen_match'])
+
+    def test_hidden_stale_neighbor_does_not_override_verified_stage(self):
+        self.pair();data=self.data();data['code_stages']['second']['source_sha256']='b'*64
+        before=json.dumps(data,sort_keys=True)
+        row=stages.checked(self.f.lesson,data,0,15)[0]
+        self.assertFalse(row['stale']);self.assertTrue(row['usable_as_screen_match'])
+        self.assertEqual(row['overlapping_stage_ids'],[])
+        self.assertEqual(json.dumps(data,sort_keys=True),before)
+
+    def test_different_code_snapshots_still_conflict_and_unrelated_stage_is_not_verified(self):
+        self.save(self.value(match='matches'));self.attach('x=2')
+        self.save(self.value(id='second',start=20,end=50,match='matches',
+            frames=[dict(time=40,sha256=course.file_hash(self.folder/'frames/1.jpg'))]))
+        later=self.f.add('later',60,90,[(70,75,'later')],[(70,b'later frame')])
+        self.save(self.value(id='unrelated',start=60,end=90,match='matches',
+            frames=[dict(time=70,sha256=course.file_hash(later/'frames/0.jpg'))]))
+        with patch.object(stages,'evidence',wraps=stages.evidence) as checked:
+            rows=stages.checked(self.f.lesson,self.data(),0,15)
+        self.assertEqual({call.args[2]['id'] for call in checked.call_args_list},{'first','second'})
+        self.assertEqual(len(rows),1);self.assertTrue(rows[0]['historical'])
+        self.assertFalse(rows[0]['usable_as_screen_match'])

@@ -4,6 +4,45 @@ sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'scripts'))
 from html_content import extract
 from material_sources import text_content
 
+class PlainTextWhitespace(unittest.TestCase):
+    def check_text(self, value, expected=None):
+        with tempfile.TemporaryDirectory() as tmp:
+            path=Path(tmp)/'material.txt';raw=value.encode('utf-8');path.write_bytes(raw)
+            self.assertEqual(text_content(path),(value if expected is None else expected,'utf8_text'))
+            self.assertEqual(path.read_bytes(),raw)
+
+    def test_python_first_line_and_nested_indentation(self):
+        self.check_text('    if ready:\n        for item in items:\n            process(item)\n')
+
+    def test_tabs_and_mixed_indentation_are_not_expanded(self):
+        self.check_text('\tif ready:\n\t\tprocess()\n\t    # original mixed indentation\n')
+
+    def test_java_indented_method_and_nested_blocks(self):
+        self.check_text('    void run() {\n        if (ready) {\n            work();\n        }\n    }\n')
+
+    def test_mixed_prose_fenced_code_and_paragraphs(self):
+        self.check_text('\n  Example:\n\n```python\n    if ready:\n        work()\n```\n\nNext paragraph.\n\n')
+
+    def test_blank_lines_and_horizontal_whitespace_are_preserved(self):
+        self.check_text('\n\n    first()  \n\n\tsecond()\t\n\n\n')
+
+    def test_terminal_newline_normalization_keeps_other_line_endings(self):
+        for value,expected in [('  code','  code\n'),('  code  ','  code  \n'),
+            ('\tfirst\r\n\r\n\tsecond\r\n','\tfirst\r\n\r\n\tsecond\n'),
+            ('  code\r','  code\n')]:
+            with self.subTest(value=value):self.check_text(value,expected)
+
+    def test_utf8_bom_does_not_remove_following_indentation(self):
+        self.check_text('\ufeff    first()\n    second()\n','    first()\n    second()\n')
+
+    def test_empty_and_whitespace_only_material_is_still_rejected(self):
+        for value in ('',' ','\n\t \r\n'):
+            with self.subTest(value=value),tempfile.TemporaryDirectory() as tmp:
+                path=Path(tmp)/'empty.txt';path.write_text(value)
+                raw=path.read_bytes()
+                with self.assertRaisesRegex(ValueError,'No readable text'):text_content(path)
+                self.assertEqual(path.read_bytes(),raw)
+
 class HTMLContent(unittest.TestCase):
     def test_readme_over_main_and_navigation(self):
         text,method=extract('<nav>Sign in</nav><main><nav>Repository menu</nav><article class="markdown-body"><h2>Java</h2><pre>if (x) {\n    call();\n}</pre></article>Footer</main>')

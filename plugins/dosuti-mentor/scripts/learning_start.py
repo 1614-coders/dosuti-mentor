@@ -70,10 +70,14 @@ def choice_state(state, home, profile, chat):
                 start_message=CHOICE_MESSAGE, choices=CHOICES, needs_chat_id=chat is None)
 
 
-def bound_state(state, home, requested_profile=None):
+def check_profile(state, requested_profile):
     if (requested_profile is not None and state.get('binding')
             and state['binding']['profile'] != requested_profile):
         raise ValueError('Chat is bound to another learner; choose a binding explicitly')
+
+
+def bound_state(state, home, requested_profile=None):
+    check_profile(state, requested_profile)
     action = ('connection_unavailable' if state['enabled'] and state['course_status'] != 'available'
               else 'continue' if state['enabled'] else 'without_course')
     return dict(learner_context(state, home), start_action=action)
@@ -87,6 +91,8 @@ def start(project=None, chat=None, home=None, *, choice=None, course=None, profi
     if chat is not None: slug(chat)
     project = Path(project).expanduser().resolve() if project is not None else None
     explicit = existing(project, chat) if project is not None else None
+    if explicit is not None and choice is None:
+        check_profile(explicit, requested_profile)
     if explicit is not None and choice is None and explicit['course_status'] != 'available':
         return dict(explicit, start_action='without_course' if explicit['explicitly_disabled'] else 'connection_unavailable')
     if explicit is not None:
@@ -117,7 +123,7 @@ def start(project=None, chat=None, home=None, *, choice=None, course=None, profi
         args = NS(course=Path(explicit['binding']['course_path']), profile=profile)
         from learning_tools import pref_file
         has_profile = has_profile or pref_file(args, 'profile').is_file()
-        if not has_profile and choice is None: return learner_context(explicit, home)
+        if not has_profile and choice is None: return bound_state(explicit, home, requested_profile)
     if choice is None and has_profile:
         return choice_state(state, home, profile, chat)
     if choice == 'existing' and course is None:

@@ -21,7 +21,7 @@ def validate_graph(names,graph):
 def recovery(current):
     """Reconstruct failed-skill obligations from actual assessments, not last answer alone."""
     stack=[]
-    for row in sorted(current['answers']+current.get('skips',[]),key=lambda r:r['revision']):
+    for row in sorted(current['answers'],key=lambda r:r['revision']):
         if row.get('action')!='answer':stack=[];continue
         assessment=row.get('assessment',{});result=assessment.get('result')
         if result=='incorrect':
