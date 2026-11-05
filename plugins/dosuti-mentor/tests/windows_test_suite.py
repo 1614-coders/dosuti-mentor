@@ -15,6 +15,7 @@ WINDOWS_MODULES = (
     'test_code_stages',
     'test_progress_initialization',
     'test_home_initialization',
+    'test_windows_managed_home',
     'test_publication',
     'test_publication_safety',
     'test_processing_job_safety',

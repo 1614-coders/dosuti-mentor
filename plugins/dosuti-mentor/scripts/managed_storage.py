@@ -28,6 +28,9 @@ def safe(path):
 
 
 def validate(home):
+    if sys.platform == 'win32':
+        from windows_managed_home import validate as windows_validate
+        return windows_validate(home)
     home = safe(home)
     from course_lifecycle import active
     active(home)
@@ -42,6 +45,9 @@ def validate(home):
 
 
 def initialize(home, legacy_runtime=False):
+    if sys.platform == 'win32':
+        from windows_managed_home import initialize as windows_initialize
+        return windows_initialize(home, legacy_runtime=legacy_runtime)
     from safe_material_import import Attempt, move_exclusive
     home = safe(home)
     if home == Path(home.anchor) or home == Path.home():
