@@ -3,6 +3,8 @@
 Portable ctypes checks do not establish Windows SDK/runtime compatibility.
 """
 import ctypes as c
+import _thread
+import threading
 import json
 import os
 from pathlib import Path
@@ -84,22 +86,265 @@ class WindowsHomeContracts(unittest.TestCase):
 
     def test_rename_buffer_layout_no_replace_relative_name(self):
         native = object.__new__(w.Native)
-        def inspect(handle, kind, buffer, length):
-            header = w.FILE_RENAME_INFO.from_buffer(buffer)
-            self.assertEqual((handle, kind, header.Flags, header.RootDirectory), (123, 3, 0, 456))
-            raw = buffer.raw[w.FILE_RENAME_INFO.FileName.offset:][:header.FileNameLength]
-            self.assertEqual(raw.decode('utf-16-le'), w.MARKER)
-            self.assertEqual(length, c.sizeof(w.FILE_RENAME_INFO) + len(raw))
-            self.assertEqual(length, 58)
-            self.assertEqual(len(buffer), length)
-            expected = bytearray(length)
-            expected[8:16] = (456).to_bytes(8, 'little')
-            expected[16:20] = len(w.MARKER.encode('utf-16-le')).to_bytes(4, 'little')
-            expected[20:20 + len(raw)] = w.MARKER.encode('utf-16-le')
-            self.assertEqual(buffer.raw, bytes(expected), 'Fields, name and all padding must match')
-            return 1
-        native.set_info = inspect
+        captured = {}
+        def inspect(handle, ios, buffer, length, kind):
+            captured.update(handle=handle, kind=kind, raw=buffer.raw, length=length)
+            return 0
+        native.rename_info = inspect
+        # Fake callbacks capture, rather than raising assertions inside the
+        # syscall: a failed assertion must not resemble an outstanding I/O.
+        native.wait_io = Mock(return_value=0)
+        native.set_info = Mock(side_effect=AssertionError('Win32 fallback forbidden'))
         native.rename(123, 456)
+        raw, length = captured['raw'], captured['length']
+        self.assertEqual((captured['handle'], captured['kind']), (123, 10))
+        self.assertEqual(length, c.sizeof(w.FILE_RENAME_INFO) + len(w.MARKER.encode('utf-16-le')))
+        self.assertEqual(length, 58)
+        self.assertEqual(len(raw), length)
+        expected = bytearray(length)
+        expected[8:16] = (456).to_bytes(8, 'little')
+        expected[16:20] = len(w.MARKER.encode('utf-16-le')).to_bytes(4, 'little')
+        expected[20:20 + len(w.MARKER.encode('utf-16-le'))] = w.MARKER.encode('utf-16-le')
+        self.assertEqual(raw, bytes(expected), 'Fields, name and all padding must match')
+        native.wait_io.assert_not_called(); native.set_info.assert_not_called()
+
+    def test_native_rename_exact_status_and_no_fallback(self):
+        for status in (0xC0000035, 0xC0000022, 0xC0000043, 0xC000000D):
+            with self.subTest(status=status):
+                api = object.__new__(w.Native)
+                api.rename_info = Mock(return_value=w.I32(status).value)
+                api.to_dos = lambda value: 183 if value & 0xffffffff == w.COLLISION else 87
+                api.wait_io = Mock(side_effect=AssertionError('Immediate failure must not wait'))
+                api.set_info = Mock(side_effect=AssertionError('No fallback'))
+                with self.assertRaises(w.NativeError) as error: api.rename(123, 456)
+                self.assertEqual(error.exception.status, status)
+                api.rename_info.assert_called_once()
+                api.wait_io.assert_not_called(); api.set_info.assert_not_called()
+
+    def test_native_rename_pending_lifetime_and_final_status(self):
+        for status in (0, 0xC0000035, 0xC0000022):
+            with self.subTest(status=status):
+                api = object.__new__(w.Native)
+                active = {}
+                def submit(handle, ios, buffer, length, kind):
+                    active.update(ios=ios, buffer=buffer, expected=buffer.raw)
+                    return 0x103
+                def wait(handle, alertable, timeout):
+                    active['wait_args'] = (handle, alertable, timeout)
+                    active['observed'] = active['buffer'].raw
+                    c.cast(active['ios'], c.POINTER(w.IO_STATUS_BLOCK)).contents.Result.Status = w.I32(status).value
+                    return 0
+                api.rename_info, api.wait_io = submit, wait
+                api.to_dos = lambda value: 183 if value & 0xffffffff == w.COLLISION else 5
+                if status == 0: api.rename(123, 456)
+                else:
+                    with self.assertRaises(w.NativeError) as error: api.rename(123, 456)
+                    self.assertEqual(error.exception.status, status)
+                self.assertEqual(active['wait_args'], (123, False, None))
+                self.assertEqual(active['observed'], active['expected'])
+
+    def test_pending_wait_error_or_interrupt_is_deferred_until_completion(self):
+        for fault in (KeyboardInterrupt(), 0xC0000008):
+            with self.subTest(fault=repr(fault)):
+                api = object.__new__(w.Native)
+                active, calls = {}, []
+                def submit(handle, ios, buffer, length, kind):
+                    active.update(ios=ios, buffer=buffer)
+                    return 0x103
+                def wait(*args):
+                    calls.append(True)
+                    if len(calls) == 1:
+                        if isinstance(fault, BaseException): raise fault
+                        return w.I32(fault).value
+                    active['size_at_completion'] = len(active['buffer'])
+                    c.cast(active['ios'], c.POINTER(w.IO_STATUS_BLOCK)).contents.Result.Status = 0
+                    return 0
+                api.rename_info, api.wait_io = submit, wait
+                with patch.object(w.time, 'sleep'):
+                    with self.assertRaises(type(fault) if isinstance(fault, BaseException) else OSError):
+                        api.rename(123, 456)
+                self.assertEqual(len(calls), 2)
+                self.assertEqual(active['size_at_completion'], 58)
+
+    def test_interrupt_before_submit_does_not_wait_or_change_iosb(self):
+        api = object.__new__(w.Native)
+        api.rename_info = Mock()
+        api.wait_io = Mock(side_effect=AssertionError('Unsubmitted request must not wait'))
+        observed = {}
+        def interrupt(ios):
+            observed['ios'] = ios
+            observed['before'] = bytes(ios)
+            raise KeyboardInterrupt()
+        with patch.object(w.c, 'byref', side_effect=interrupt):
+            with self.assertRaises(KeyboardInterrupt): api.rename(123, 456)
+        api.rename_info.assert_not_called()
+        api.wait_io.assert_not_called()
+        self.assertEqual(bytes(observed['ios']), observed['before'])
+
+    def test_interrupt_before_or_during_worker_start_never_submits(self):
+        original = threading.Thread.start
+        for launched in (False, True):
+            with self.subTest(launched=launched):
+                api = object.__new__(w.Native)
+                api.rename_info = Mock(return_value=0)
+                api.wait_io = Mock(side_effect=AssertionError('No I/O was submitted'))
+                workers = []
+                def start(worker):
+                    workers.append(worker)
+                    if launched: original(worker)
+                    raise KeyboardInterrupt()
+                handler = w.signal.getsignal(w.signal.SIGINT)
+                with patch.object(threading.Thread, 'start', start):
+                    with self.assertRaises(KeyboardInterrupt): api.rename(123, 456)
+                self.assertIs(w.signal.getsignal(w.signal.SIGINT), handler)
+                for worker in workers:
+                    if launched:
+                        worker.join(timeout=2)
+                        self.assertFalse(worker.is_alive(), 'Cancelled worker must exit')
+                self.assertEqual(len(workers), 1, 'Must exercise the worker launch')
+                api.rename_info.assert_not_called()
+                api.wait_io.assert_not_called()
+
+    def test_worker_exception_before_native_submit_never_drains(self):
+        api = object.__new__(w.Native)
+        observed = {}
+        def unsubmitted(handle, ios, buffer, length, kind):
+            observed['ios'] = c.cast(ios, c.POINTER(w.IO_STATUS_BLOCK)).contents
+            observed['before'] = bytes(observed['ios'])
+            raise KeyboardInterrupt()  # No API invoked, no kernel request exists.
+        api.rename_info = unsubmitted
+        api.wait_io = Mock(side_effect=AssertionError('Never wait for unsubmitted I/O'))
+        with self.assertRaises(KeyboardInterrupt): api.rename(123, 456)
+        api.wait_io.assert_not_called()
+        self.assertEqual(bytes(observed['ios']), observed['before'])
+
+    def test_main_interrupt_at_native_entry_preserves_worker_ownership(self):
+        api = object.__new__(w.Native)
+        observed = {}
+        release = threading.Event()
+        def submit(handle, ios, buffer, length, kind):
+            observed['thread'] = threading.get_ident()
+            observed['args'] = (handle, kind, length)
+            _thread.interrupt_main()
+            observed['released'] = release.wait(2)
+            observed['buffer'] = buffer.raw
+            observed['completed'] = True
+            return 0
+        api.rename_info = submit
+        api.wait_io = Mock(side_effect=AssertionError('Immediate completion must not drain'))
+        timer = threading.Timer(0.05, release.set)
+        timer.start()
+        try:
+            with self.assertRaises(KeyboardInterrupt): api.rename(123, 456)
+            self.assertTrue(observed['completed'], 'Caller must not unwind before native return')
+        finally:
+            release.set(); timer.join(timeout=2)
+        self.assertNotEqual(observed['thread'], threading.get_ident())
+        self.assertTrue(observed['released'])
+        self.assertEqual(observed['args'], (123, 10, 58))
+        self.assertEqual(len(observed['buffer']), 58)
+        api.wait_io.assert_not_called()
+
+    def test_main_interrupt_during_real_pending_waits_for_completion(self):
+        api = object.__new__(w.Native)
+        active = {}
+        release = threading.Event()
+        def submit(handle, ios, buffer, length, kind):
+            active.update(ios=ios, buffer=buffer, home=c.cast(c.addressof(buffer), c.POINTER(w.FILE_RENAME_INFO)).contents.RootDirectory)
+            return 0x103
+        def wait(handle, alertable, timeout):
+            active['handle'] = handle
+            _thread.interrupt_main()
+            active['released'] = release.wait(2)
+            active['size'] = len(active['buffer'])
+            c.cast(active['ios'], c.POINTER(w.IO_STATUS_BLOCK)).contents.Result.Status = 0
+            active['completed'] = True
+            return 0
+        api.rename_info, api.wait_io = submit, Mock(side_effect=wait)
+        timer = threading.Timer(0.05, release.set)
+        timer.start()
+        try:
+            with self.assertRaises(KeyboardInterrupt): api.rename(123, 456)
+            self.assertTrue(active['completed'], 'Pending resources must survive main interrupt')
+        finally:
+            release.set(); timer.join(timeout=2)
+        self.assertTrue(active['released'])
+        self.assertEqual((active['handle'], active['home'], active['size']), (123, 456, 58))
+        api.wait_io.assert_called_once()
+
+    def test_repeated_main_wait_interrupts_still_observe_worker_completion(self):
+        api = object.__new__(w.Native)
+        original_event = threading.Event
+        events, waits, completed = [], [], []
+        def event():
+            value = original_event()
+            events.append(value)
+            if len(events) == 3:  # rename's completion notification, not native IOSB
+                original_wait = value.wait
+                def wait(timeout=None):
+                    waits.append(True)
+                    if len(waits) <= 2: raise KeyboardInterrupt()
+                    return original_wait(timeout)
+                value.wait = wait
+            return value
+        def submit(*args):
+            completed.append(threading.get_ident())
+            return 0
+        api.rename_info = submit
+        api.wait_io = Mock(side_effect=AssertionError('No pending native request'))
+        with patch.object(threading, 'Event', side_effect=event):
+            with self.assertRaises(KeyboardInterrupt): api.rename(123, 456)
+        self.assertGreaterEqual(len(waits), 3)
+        self.assertEqual(len(completed), 1)
+        self.assertNotEqual(completed[0], threading.get_ident())
+        api.wait_io.assert_not_called()
+
+    def test_unknown_sigint_handler_refuses_before_start(self):
+        api = object.__new__(w.Native)
+        api.rename_info, api.wait_io = Mock(), Mock()
+        with patch.object(w.signal, 'getsignal', return_value=None):
+            with patch.object(w.signal, 'signal') as change, patch.object(threading.Thread, 'start') as start:
+                with self.assertRaisesRegex(ValueError, 'unknown SIGINT handler'): api.rename(123, 456)
+        change.assert_not_called(); start.assert_not_called()
+        api.rename_info.assert_not_called(); api.wait_io.assert_not_called()
+
+    def test_sigint_handler_is_preserved_and_delivered_only_after_completion(self):
+        for ignored in (False, True):
+            with self.subTest(ignored=ignored):
+                api = object.__new__(w.Native)
+                completed, delivered = [], []
+                def handler(signum, frame):
+                    delivered.append((signum, bool(completed), threading.get_ident()))
+                expected = w.signal.SIG_IGN if ignored else handler
+                original = w.signal.signal(w.signal.SIGINT, expected)
+                def submit(*args):
+                    _thread.interrupt_main()
+                    completed.append(True)
+                    return 0
+                api.rename_info = submit
+                api.wait_io = Mock(side_effect=AssertionError('No pending request'))
+                try:
+                    api.rename(123, 456)
+                    self.assertIs(w.signal.getsignal(w.signal.SIGINT), expected)
+                finally:
+                    w.signal.signal(w.signal.SIGINT, original)
+                self.assertEqual(delivered, [] if ignored else [(w.signal.SIGINT, True, threading.get_ident())])
+                api.wait_io.assert_not_called()
+
+    def test_interrupt_after_completion_does_not_drain(self):
+        api = object.__new__(w.Native)
+        completed = []
+        def submit(*args):
+            completed.append(True)
+            return 0
+        def verify(status, operation):
+            self.assertEqual(completed, [True])
+            self.assertEqual(status, 0)
+            _thread.interrupt_main()
+        api.rename_info, api.status = submit, verify
+        api.wait_io = Mock(side_effect=AssertionError('Completed request must not wait'))
+        with self.assertRaises(KeyboardInterrupt): api.rename(123, 456)
+        api.wait_io.assert_not_called()
 
 
 class MarkerProtocolModel(unittest.TestCase):

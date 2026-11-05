@@ -10,8 +10,10 @@ import os
 from pathlib import Path, PureWindowsPath
 import platform
 import re
+import signal
 import struct
 import sys
+import threading
 import time
 import uuid
 
@@ -124,6 +126,8 @@ class Native:
         P = c.c_void_p
         self.create = bind(self.n, 'NtCreateFile', [c.POINTER(HANDLE), U32, c.POINTER(OBJECT_ATTRIBUTES),
             c.POINTER(IO_STATUS_BLOCK), P, U32, U32, U32, U32, P, U32], I32)
+        self.rename_info = bind(self.n, 'NtSetInformationFile', [HANDLE, c.POINTER(IO_STATUS_BLOCK), P, U32, U32], I32)
+        self.wait_io = bind(self.n, 'NtWaitForSingleObject', [HANDLE, c.c_ubyte, P], I32)
         self.ntclose = bind(self.n, 'NtClose', [HANDLE], I32)
         self.to_dos = bind(self.n, 'RtlNtStatusToDosError', [I32], U32)
         self.query_volume = bind(self.n, 'NtQueryVolumeInformationFile', [HANDLE, c.POINTER(IO_STATUS_BLOCK), P, U32, U32], I32)
@@ -268,7 +272,87 @@ class Native:
         header = FILE_RENAME_INFO.from_buffer(buffer)
         header.Flags, header.RootDirectory, header.FileNameLength = 0, home, len(name)
         c.memmove(c.addressof(buffer) + FILE_RENAME_INFO.FileName.offset, name, len(name))
-        self.boolean(self.set_info(handle, 3, buffer, len(buffer)))
+        ios = IO_STATUS_BLOCK()
+        ios.Result.Status = 0x103  # Not completion evidence until the request completes.
+
+        def drain():
+            # The source has SYNCHRONIZE and synchronous non-alertable I/O.
+            # Never unwind buffers or allow HomeSession to close HANDLEs while
+            # pending. Interrupts/wait failures are deferred until completion.
+            deferred = None
+            while True:
+                try:
+                    waited = self.wait_io(handle, False, None)  # No timeout: drain outstanding I/O.
+                    final = ios.Result.Status & 0xffffffff
+                    if waited == 0 and final != 0x103:
+                        return I32(final).value, deferred
+                    if deferred is None:
+                        deferred = OSError(f'Rename I/O completion not established: wait=0x{waited & 0xffffffff:08X}')
+                    time.sleep(0.01)
+                except BaseException as error:
+                    if deferred is None: deferred = error
+
+        # Prepare before any worker can submit. Console SIGINT is dispatched in
+        # the main Python thread, never across the worker's ctypes boundary.
+        rename = self.rename_info
+        arguments = (handle, c.byref(ios), buffer, len(buffer), 10)
+        go, cancel, done = threading.Event(), threading.Event(), threading.Event()
+        outcome = {}
+
+        def execute():
+            try:
+                # Poll as well as wait: an interrupted Event.set in the caller
+                # may set its flag before notifying sleepers.
+                while not go.wait(0.05): pass
+                if cancel.is_set(): return  # No native request was authorized.
+                result = rename(*arguments)
+                if result & 0xffffffff == 0x103:
+                    result, deferred = drain()  # Only an actual returned PENDING.
+                    if deferred is not None: raise deferred
+                outcome['result'] = result
+            except BaseException as error:
+                outcome['error'] = error
+            finally:
+                done.set()  # No outstanding native I/O; caller may release HANDLEs.
+
+        worker = threading.Thread(target=execute, name='dosuti-home-rename', daemon=False)
+        deferred, previous, interrupted = None, None, []
+        try:
+            if threading.current_thread() is threading.main_thread():
+                previous = signal.getsignal(signal.SIGINT)
+                if previous is None:
+                    raise ValueError('Cannot safely defer an unknown SIGINT handler')
+                def defer_interrupt(signum, frame):
+                    # No locks or exceptions in a signal handler. Coalesce Ctrl+C.
+                    interrupted[:] = [(signum, frame)]
+                signal.signal(signal.SIGINT, defer_interrupt)
+            try:
+                worker.start()
+                go.set()
+            finally:
+                # If start is interrupted before OR after OS thread creation,
+                # cancellation forbids submit unless go was already published.
+                # Keep the caller's session alive until authorized work finishes.
+                while True:
+                    try:
+                        if not go.is_set():
+                            cancel.set()
+                            go.set()
+                        if not cancel.is_set() and not done.wait(0.05): continue
+                        break
+                    except BaseException as error:
+                        if deferred is None: deferred = error
+        finally:
+            # SIGINT deferral also protects the cleanup loop's Python bytecode
+            # boundaries. Restore before delivering it, with no live request.
+            if previous is not None: signal.signal(signal.SIGINT, previous)
+        if interrupted:
+            if callable(previous): previous(*interrupted[-1])
+            elif previous == signal.SIG_DFL: signal.raise_signal(signal.SIGINT)
+        if deferred is not None: raise deferred
+        if 'error' in outcome: raise outcome['error']
+        self.status(outcome['result'], 'NtSetInformationFile FileRenameInformation')
+
 
 
 class HomeSession:

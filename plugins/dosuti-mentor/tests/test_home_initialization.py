@@ -189,10 +189,9 @@ class HomeInitialization(unittest.TestCase):
         self.assertTrue(error['exception_type']); self.assertTrue(error['exception_module'])
         self.assertTrue(error['message'])
         if (platform_name or sys.platform) == 'win32':
-            # Native.rename uses SetFileInformationByHandle -> GetLastError ->
-            # ctypes.WinError, NOT Native.status/RtlNtStatusToDosError.
-            self.assertIn(error['winerror'], (80, 183),
-                          'Wrong rename failure reason: expected ERROR_FILE_EXISTS/ERROR_ALREADY_EXISTS')
+            # Production now exposes the native return/completion NTSTATUS.
+            self.assertEqual(error['ntstatus'], 0xC0000035,
+                             'Wrong rename failure reason: expected STATUS_OBJECT_NAME_COLLISION')
         else:
             self.assertEqual(error['errno'], errno.EEXIST,
                              'Wrong rename failure reason: expected EEXIST')
@@ -486,14 +485,15 @@ class PublicationRaceEvidence(unittest.TestCase):
 
     def test_collision_codes_are_explicit_and_platform_specific(self):
         case = HomeInitialization()
-        for code in (80, 183):
-            error = OSError(errno.EEXIST, 'existing destination'); error.winerror = code
-            case.assert_collision(rename_error(error), platform_name='win32')
+        import windows_managed_home as native
+        case.assert_collision(rename_error(native.NativeError('rename', 0xC0000035, 183)), platform_name='win32')
         case.assert_collision(rename_error(FileExistsError(errno.EEXIST, 'exists')), platform_name='darwin')
-        # A raw NTSTATUS or errno alone does not establish a Win32 rename collision.
-        error = OSError(errno.EEXIST, 'no Win32 error'); error.status = 0xC0000035
-        with self.assertRaisesRegex(AssertionError, 'Wrong rename failure reason'):
-            case.assert_collision(rename_error(error), platform_name='win32')
+        # A Win32 code alone or a different native status is never a collision.
+        for status, code in ((None, 80), (None, 183), (0xC0000022, 183), (0xC0000043, 183)):
+            error = OSError(errno.EEXIST, 'unrelated rename error'); error.winerror = code
+            if status is not None: error.status = status
+            with self.assertRaisesRegex(AssertionError, 'Wrong rename failure reason'):
+                case.assert_collision(rename_error(error), platform_name='win32')
 
     def test_early_child_exit_does_not_count_as_barrier(self):
         for method in ('test_independent_processes_keep_first_published_id',
