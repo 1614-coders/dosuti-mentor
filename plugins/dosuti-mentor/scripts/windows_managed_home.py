@@ -264,7 +264,7 @@ class Native:
 
     def rename(self, handle, home):
         name = MARKER.encode('utf-16-le')
-        buffer = c.create_string_buffer(max(c.sizeof(FILE_RENAME_INFO), FILE_RENAME_INFO.FileName.offset + len(name) + 2))
+        buffer = c.create_string_buffer(c.sizeof(FILE_RENAME_INFO) + len(name))
         header = FILE_RENAME_INFO.from_buffer(buffer)
         header.Flags, header.RootDirectory, header.FileNameLength = 0, home, len(name)
         c.memmove(c.addressof(buffer) + FILE_RENAME_INFO.FileName.offset, name, len(name))

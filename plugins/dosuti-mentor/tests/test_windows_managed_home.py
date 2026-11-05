@@ -89,7 +89,14 @@ class WindowsHomeContracts(unittest.TestCase):
             self.assertEqual((handle, kind, header.Flags, header.RootDirectory), (123, 3, 0, 456))
             raw = buffer.raw[w.FILE_RENAME_INFO.FileName.offset:][:header.FileNameLength]
             self.assertEqual(raw.decode('utf-16-le'), w.MARKER)
-            self.assertGreaterEqual(length, w.FILE_RENAME_INFO.FileName.offset + len(raw))
+            self.assertEqual(length, c.sizeof(w.FILE_RENAME_INFO) + len(raw))
+            self.assertEqual(length, 58)
+            self.assertEqual(len(buffer), length)
+            expected = bytearray(length)
+            expected[8:16] = (456).to_bytes(8, 'little')
+            expected[16:20] = len(w.MARKER.encode('utf-16-le')).to_bytes(4, 'little')
+            expected[20:20 + len(raw)] = w.MARKER.encode('utf-16-le')
+            self.assertEqual(buffer.raw, bytes(expected), 'Fields, name and all padding must match')
             return 1
         native.set_info = inspect
         native.rename(123, 456)
