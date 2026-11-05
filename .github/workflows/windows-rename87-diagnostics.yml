@@ -1,0 +1,84 @@
+name: Windows rename87 diagnostics
+
+on:
+  push:
+    branches: [codex/windows-rename87-diagnostics]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-rename87-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  PYTHONDONTWRITEBYTECODE: '1'
+  PYTHONUTF8: '1'
+  PYTHONIOENCODING: utf-8
+
+jobs:
+  diagnose:
+    name: Windows x64 NTFS / ${{ matrix.shell }}
+    runs-on: windows-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        shell: [pwsh, powershell]
+    defaults:
+      run:
+        shell: ${{ matrix.shell }}
+    steps:
+      - uses: actions/checkout@9f698171ed81b15d1823a05fc7211befd50c8ae0 # v6.0.3
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Prepare evidence directory
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path diagnostic-output -Force | Out-Null
+          git rev-parse HEAD 'HEAD^{tree}' 'HEAD^' | Set-Content -Encoding utf8 diagnostic-output/git-provenance.txt
+          "runner=$env:RUNNER_NAME image=$env:ImageOS version=$env:ImageVersion arch=$env:RUNNER_ARCH" | Set-Content -Encoding utf8 diagnostic-output/runner.txt
+      - uses: actions/setup-python@e797f83bcb11b83ae66e0230d6156d7c80228e7c # v6.0.0
+        with:
+          python-version: '3.12'
+          architecture: x64
+      - name: Verify native environment and unchanged production
+        id: environment
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSVersionTable | Out-String | Set-Content -Encoding utf8 diagnostic-output/powershell.txt
+          if ('${{ matrix.shell }}' -eq 'pwsh' -and $PSVersionTable.PSVersion.Major -ne 7) { throw 'PowerShell 7 required' }
+          if ('${{ matrix.shell }}' -eq 'powershell' -and ($PSVersionTable.PSVersion.Major -ne 5 -or $PSVersionTable.PSVersion.Minor -ne 1)) { throw 'Windows PowerShell 5.1 required' }
+          $tempRoot = [System.IO.Path]::GetPathRoot([System.IO.Path]::GetTempPath())
+          $format = ([System.IO.DriveInfo]::new($tempRoot)).DriveFormat
+          "tempRoot=$tempRoot filesystem=$format" | Set-Content -Encoding utf8 diagnostic-output/filesystem.txt
+          if ($format -ne 'NTFS' -or $env:RUNNER_ARCH -ne 'X64') { throw 'Windows x64 / NTFS required' }
+          python -X utf8 -B -c "import sys,struct,platform,json,subprocess; from pathlib import Path; assert sys.platform=='win32' and struct.calcsize('P')==8; assert platform.machine().upper() in ('AMD64','X86_64'); assert subprocess.check_output(['git','rev-parse','HEAD^'],text=True).strip()=='a9fca79c2c3b46cd5b282164773bc132aec627d4'; expected={'plugins/dosuti-mentor/scripts/windows_managed_home.py':'b06a57cf6241146c1ea9771f6ad95fbd16bfbd6a','plugins/dosuti-mentor/scripts/managed_storage.py':'20e6c3b4246d0130139e72b13dfdfd7f9ba8830f'}; assert all(subprocess.check_output(['git','hash-object',p],text=True).strip()==h for p,h in expected.items()); assert json.loads(Path('plugins/dosuti-mentor/plugin.json').read_text())['version']=='0.8.6'; print(json.dumps({'python':sys.version,'platform':platform.platform(),'machine':platform.machine(),'pointer_size':struct.calcsize('P'),'production_blobs':expected}))" > diagnostic-output/python-environment.json
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Run instrumentation self-checks
+        if: ${{ !cancelled() && steps.environment.outcome == 'success' }}
+        run: |
+          cmd /d /c "python -X utf8 -B -m unittest discover -s plugins/dosuti-mentor/tests -p test_windows_rename_diagnostics.py -v > diagnostic-output/self-check.stdout.log 2> diagnostic-output/self-check.stderr.log"
+          $code = $LASTEXITCODE
+          $code | Set-Content -Encoding ascii diagnostic-output/self-check.exit-code.txt
+          Get-Content -Encoding UTF8 diagnostic-output/self-check.stderr.log
+          exit $code
+      - name: Run all six isolated rename experiments
+        if: ${{ !cancelled() && steps.environment.outcome == 'success' }}
+        run: |
+          cmd /d /c "python -X utf8 -B plugins/dosuti-mentor/tests/diagnose_windows_home_rename.py --compare-native > diagnostic-output/results.jsonl 2> diagnostic-output/diagnostic.stderr.log"
+          $code = $LASTEXITCODE
+          $code | Set-Content -Encoding ascii diagnostic-output/diagnostic.exit-code.txt
+          Copy-Item diagnostic-output/results.jsonl diagnostic-output/diagnostic.stdout.log
+          Get-Content -Encoding UTF8 diagnostic-output/results.jsonl
+          Get-Content -Encoding UTF8 diagnostic-output/diagnostic.stderr.log
+          exit $code
+      - name: Upload diagnostic evidence even after failure
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: windows-rename87-${{ matrix.shell }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: diagnostic-output/
+          if-no-files-found: error
+          retention-days: 7
