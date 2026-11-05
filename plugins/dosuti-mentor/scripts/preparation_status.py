@@ -53,15 +53,26 @@ def tracked(function=None, *, complete_stage='review'):
         base = safe(directory / '.preparation')
         attempt = uuid.uuid4().hex
         folder = base / attempt
-        folder.mkdir(parents=True)
-        with file_lock(folder / '.processing.lock'):
-            report = Reporter(folder)
+        owner = None
+        if getattr(args, 'import_prepared', None):
+            from safe_material_import import current
+            from safe_prepared_import import metadata
+            owner = current(directory)
+            base_fd = owner.guard.open(owner.fd, '.preparation', create=True)
+            folder_fd = owner.fresh_at(base_fd, attempt)
+            lock = file_lock(folder / '.processing.lock', directory_fd=folder_fd)
+        else:
+            folder.mkdir(parents=True)
+            lock = file_lock(folder / '.processing.lock')
+        with lock:
+            report = Reporter(folder, writer=(lambda value: metadata(owner, folder_fd, 'processing-status.json', value)) if owner else None)
             data = course.read(directory / 'lesson.json')
             report.data.update(source_url_sha256=hashlib.sha256(data['video']['source'].encode()).hexdigest(),
                                start=getattr(args, 'start', 0), requested_duration=getattr(args, 'duration', None))
             report.set('download')
-            with file_lock(directory / '.lesson.lock'):
-                atomic_json(base / 'current.json', dict(attempt=attempt))
+            with file_lock(directory / '.lesson.lock', **({'directory_fd': owner.fd} if owner else {})):
+                if owner: metadata(owner, base_fd, 'current.json', dict(attempt=attempt))
+                else: atomic_json(base / 'current.json', dict(attempt=attempt))
             token = _CURRENT.set(report)
             from preparation_control import REQUEST, check_cancel
             cancel_token = REQUEST.set(folder / 'cancel.json')
@@ -71,7 +82,9 @@ def tracked(function=None, *, complete_stage='review'):
                 report.set(complete_stage, 'complete')
                 return result
             except BaseException as error:
-                report.set(report.data['stage'], 'interrupted' if isinstance(error, (KeyboardInterrupt, SystemExit)) else 'failed', error)
+                try: report.set(report.data['stage'], 'interrupted' if isinstance(error, (KeyboardInterrupt, SystemExit)) else 'failed', error)
+                except Exception as failure:
+                    error.add_note('Preparation status preserved without unsafe retry: ' + str(failure))
                 raise
             finally:
                 REQUEST.reset(cancel_token)

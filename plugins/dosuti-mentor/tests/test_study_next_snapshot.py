@@ -39,7 +39,11 @@ class StudyNextSnapshot(unittest.TestCase):
             self.assertEqual(value['journal_revision'],value['learning_progress']['unit_event_count'])
             self.assertIn('maps',value['learning_progress']['demonstrated_units'])
             self.assertFalse(any(r['action']=='review_error' for r in value['recommendations']))
-        else:self.assertEqual(value['recommendations'],[])
+            self.assertFalse(any(r['action']=='review_error' for r in value['returning']['actions']))
+            self.assertTrue(value['returning']['knowledge']['confirmed_criteria'])
+        else:
+            self.assertEqual(value['recommendations'],[])
+            self.assertEqual(value['returning']['actions'],[])
 
     def other_chat_update(self, command, value):
         incoming=self.f.f.f.directory/'other-chat-update.json'
@@ -80,7 +84,7 @@ class StudyNextSnapshot(unittest.TestCase):
         self.assertEqual(value['recommendations'][0]['action'],'review_error')
         self.assertEqual(set(value),{'valid','profile','session','journal_revision','as_of',
             'learning_intent','learning_progress','recommendations','recommendation_count','truncated',
-            'blocked','blocked_count','continuations','continuation_count','roadmap','policy','verification'})
+            'blocked','blocked_count','continuations','continuation_count','roadmap','returning','policy','verification'})
         self.assertEqual(before,self.files())
 
     def test_corrupt_journals_never_offer_recommendations_or_write(self):

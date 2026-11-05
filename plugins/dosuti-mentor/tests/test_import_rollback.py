@@ -10,6 +10,9 @@ import unittest
 from unittest.mock import patch
 import test_persistence
 import course
+import safe_material_import as safe
+import safe_zip_import as secure
+import safe_prepared_import as prepared_io
 import material_sources as materials
 
 
@@ -26,24 +29,22 @@ class ImportRollback(unittest.TestCase):
     def files(self):
         return {str(p.relative_to(self.directory)):p.read_bytes() for p in self.directory.rglob('*') if p.is_file()}
 
-    def test_failed_registration_preserves_existing_materials_and_removes_attempt(self):
+    def test_failed_registration_preserves_existing_materials_and_warns_about_residue(self):
         for kind in ('code','homework','resources'):
             with self.subTest(kind=kind):
                 self.attach(kind)
                 before=self.files()
-                with patch.object(course,'update_lesson',side_effect=KeyboardInterrupt('cancel import')):
+                with patch.object(secure,'publish',side_effect=KeyboardInterrupt('cancel import')):
                     with self.assertRaises(KeyboardInterrupt):self.attach(kind)
-                self.assertEqual(self.files(),before)
+                self.assertTrue(all(self.files()[name]==value for name,value in before.items()))
                 self.assertEqual(self.source.read_text(),'user original')
 
-    def test_failed_sealing_removes_even_readonly_snapshot(self):
-        seal=course.seal_snapshot
-        def fail(folder):seal(folder);raise ValueError('seal failed')
+    def test_failed_verification_keeps_unregistered_readonly_snapshot(self):
         before=self.files()
-        with patch.object(course,'seal_snapshot',side_effect=fail):
+        with patch.object(safe.Attempt,'check',side_effect=ValueError('seal failed')):
             with self.assertRaisesRegex(ValueError,'seal failed'):self.attach('code')
-        self.assertEqual(self.files(),before)
-        self.assertFalse(list((self.directory/'code').iterdir()))
+        self.assertTrue(all(self.files()[name]==value for name,value in before.items()))
+        self.assertEqual(len(list((self.directory/'code').iterdir())),1)
 
     def test_rejected_link_does_not_delete_foreign_target(self):
         folder=self.f.directory/'code-source';folder.mkdir()
@@ -51,13 +52,13 @@ class ImportRollback(unittest.TestCase):
         except OSError:self.skipTest('Symlink creation unavailable')
         with self.assertRaises(ValueError):self.attach('code',folder)
         self.assertEqual(self.source.read_text(),'user original')
-        self.assertFalse(list((self.directory/'code').iterdir()))
+        self.assertTrue(list((self.directory/'code').iterdir()))
 
     def test_error_after_atomic_save_preserves_registered_copy_and_raw_origin(self):
         source=self.f.directory/'homework.html';source.write_text('<p>Task</p>')
-        save=course.save
-        def fail(path,value):save(path,value);raise OSError('after atomic save')
-        with patch.object(course,'save',side_effect=fail):
+        publish=secure.publish
+        def fail(*a,**kw):publish(*a,**kw);raise OSError('after atomic save')
+        with patch.object(secure,'publish',side_effect=fail):
             with self.assertRaisesRegex(OSError,'after atomic save'):self.attach('homework',source)
         value=course.read(self.directory/'lesson.json')['homework']
         self.assertTrue(Path(value['file']).is_file())
@@ -68,9 +69,9 @@ class ImportRollback(unittest.TestCase):
     def test_resource_text_survives_error_after_its_registration(self):
         self.attach('resources')
         row=course.read(self.directory/'lesson.json')['resources']['items'][0]
-        save=course.save
-        def fail(path,value):save(path,value);raise OSError('after atomic save')
-        with patch.object(course,'save',side_effect=fail):
+        publish=secure.publish
+        def fail(*a,**kw):publish(*a,**kw);raise OSError('after atomic save')
+        with patch.object(secure,'publish',side_effect=fail):
             with self.assertRaises(OSError):
                 materials.resource(self.f.args(action='extract',resource_id=row['id'],expected_revision=None,notes=None))
         current=materials.resource(self.f.args(action='list'))['items'][0]
@@ -86,48 +87,51 @@ class ImportRollback(unittest.TestCase):
 
     def test_concurrent_failure_cannot_remove_successful_import(self):
         self.attach('code')
-        barrier=threading.Barrier(2);local=threading.local();update=course.update_lesson
-        def guarded(directory,change):
+        barrier=threading.Barrier(2);local=threading.local();update=secure.publish
+        def guarded(*a,**kw):
             barrier.wait(timeout=5)
             if local.fail:raise ValueError('one attempt failed')
-            return update(directory,change)
+            return update(*a,**kw)
         def worker(fail):
             local.fail=fail
             try:course.attach(self.f.args(kind='code',source=str(self.source),none=False,ref=None,resource_type='file'))
             except ValueError:
                 if not fail:raise
-        with patch.object(course,'update_lesson',side_effect=guarded),contextlib.redirect_stdout(io.StringIO()),ThreadPoolExecutor(2) as pool:
+        with patch.object(secure,'publish',side_effect=guarded),contextlib.redirect_stdout(io.StringIO()),ThreadPoolExecutor(2) as pool:
             jobs=[pool.submit(worker,flag) for flag in (True,False)]
             for job in jobs:job.result(timeout=10)
         row=course.read(self.directory/'lesson.json')['code']
         self.assertEqual(course.verify_snapshot(row),'snapshot_hashes_match')
-        self.assertEqual(len(list((self.directory/'code').iterdir())),2)
+        self.assertEqual(len(list((self.directory/'code').iterdir())),3)
 
     def test_file_name_collision_preserves_unowned_file(self):
-        target=self.directory/'homework'/('a'*8+'-'+self.source.name)
-        target.parent.mkdir();target.write_text('foreign file')
+        target=self.directory/'homework'/('a'*12)
+        target.mkdir(parents=True);(target/'keep').write_text('foreign file')
         with patch.object(course.uuid,'uuid4',return_value=NS(hex='a'*32)):
             with self.assertRaises(FileExistsError):self.attach('homework')
-        self.assertEqual(target.read_text(),'foreign file')
+        self.assertEqual((target/'keep').read_text(),'foreign file')
 
-    def test_failed_prepared_import_removes_only_new_copy(self):
-        source=self.f.packet();copytree=course.shutil.copytree
-        def fail(src,dst,*a,**kw):
-            if Path(src).resolve()==(source/'frames').resolve():raise OSError('copy failed')
-            return copytree(src,dst,*a,**kw)
-        with patch.object(course.shutil,'copytree',side_effect=fail):
+    def test_failed_prepared_import_preserves_original_and_warns_about_residue(self):
+        source=self.f.packet();tree=prepared_io.copy_frames;errors=io.StringIO()
+        def fail(attempt,src,dst,*a,**kw):
+            if Path(src).resolve()==source.resolve():raise OSError('copy failed')
+            return tree(attempt,src,dst,*a,**kw)
+        with patch.object(prepared_io,'copy_frames',fail),contextlib.redirect_stderr(errors):
             with self.assertRaises(OSError):course.prepare(self.f.args(import_prepared=source))
         self.assertTrue((source/'manifest.json').exists())
-        self.assertFalse(list((self.directory/'prepared').glob('import-*')))
+        self.assertEqual(course.read(self.directory/'lesson.json')['prepared_fragments'],[])
+        self.assertTrue(list((self.directory/'prepared').glob('import-*')))
+        self.assertIn('preserved',errors.getvalue())
 
-    def test_interrupted_copy_removes_partial_file(self):
+    def test_interrupted_copy_preserves_original_and_allows_retry(self):
         before=self.files()
-        def fail(src,dst,*a,**kw):
-            Path(dst).write_bytes(b'partial');raise KeyboardInterrupt('copy interrupted')
-        with patch.object(course.shutil,'copyfile',side_effect=fail):
+        def fail(*a,**kw):raise KeyboardInterrupt('copy interrupted')
+        with patch.object(safe.Attempt,'copy',side_effect=fail):
             with self.assertRaises(KeyboardInterrupt):self.attach('homework')
         self.assertEqual(self.files(),before)
         self.assertEqual(self.source.read_text(),'user original')
+        self.attach('homework')
+        self.assertEqual(course.homework_integrity(course.read(self.directory/'lesson.json')['homework']),'verified')
 
     def test_parallel_successful_duplicates_keep_both_snapshots(self):
         args=self.f.args(kind='code',source=str(self.source),none=False,ref=None,resource_type='file')
@@ -140,31 +144,31 @@ class ImportRollback(unittest.TestCase):
         self.assertTrue(all(Path(p).is_dir() for p in paths))
 
     def test_registered_snapshot_in_history_is_not_rolled_back(self):
-        update=course.update_lesson
-        def fail_after_replacement(directory,change):
-            update(directory,change)
-            with patch.object(course,'update_lesson',update):self.attach('code')
+        update=secure.publish
+        def fail_after_replacement(*a,**kw):
+            update(*a,**kw)
+            with patch.object(secure,'publish',update):self.attach('code')
             raise OSError('after another registration')
-        with patch.object(course,'update_lesson',side_effect=fail_after_replacement):
+        with patch.object(secure,'publish',side_effect=fail_after_replacement):
             with self.assertRaises(OSError):self.attach('code')
         row=course.read(self.directory/'lesson.json')['code']
         self.assertEqual(len([p for p in row['history'] if 'snapshot' in p]),1)
         self.assertTrue(all(Path(v['snapshot']).is_dir() for v in [row]+row['history'] if 'snapshot' in v))
 
     def test_unreadable_registry_preserves_uncertain_attempt(self):
-        def fail(directory,change):
+        def fail(args,directory,*a,**kw):
             (directory/'lesson.json').write_text('{');raise ValueError('registration failed')
         errors=io.StringIO()
-        with patch.object(course,'update_lesson',side_effect=fail),contextlib.redirect_stderr(errors):
+        with patch.object(secure,'publish',side_effect=fail),contextlib.redirect_stderr(errors):
             with self.assertRaisesRegex(ValueError,'registration failed'):self.attach('code')
         self.assertIn('preserved',errors.getvalue())
         self.assertEqual(len(list((self.directory/'code').iterdir())),1)
         self.assertEqual(self.source.read_text(),'user original')
 
     def test_registered_prepared_import_survives_post_commit_error(self):
-        source=self.f.packet();save=course.save
-        def fail(path,value):save(path,value);raise OSError('after atomic save')
-        with patch.object(course,'save',side_effect=fail):
+        source=self.f.packet();save=secure.publish
+        def fail(*a,**kw):save(*a,**kw);raise OSError('after atomic save')
+        with patch.object(secure,'publish',side_effect=fail):
             with self.assertRaises(OSError):course.prepare(self.f.args(import_prepared=source))
         row=course.read(self.directory/'lesson.json')['prepared_fragments'][0]
         self.assertTrue(Path(row['folder']).is_dir())
@@ -178,16 +182,16 @@ class ImportRollback(unittest.TestCase):
         with patch.object(course,'preparation_run',side_effect=fail):
             with self.assertRaises(subprocess.CalledProcessError):self.attach('code','https://github.com/example/repo')
         self.assertEqual(self.files(),before)
-        self.assertFalse(list((self.directory/'code').iterdir()))
+        self.assertFalse((self.directory/'code').exists())
 
     def test_resource_cas_failure_removes_new_text_but_preserves_old_raw(self):
         self.attach('resources')
         row=course.read(self.directory/'lesson.json')['resources']['items'][0]
-        update=course.update_lesson
-        def replace(directory,change):
-            update(directory,lambda data:data.update(resources=dict(status='absent',items=[])))
-            return update(directory,change)
-        with patch.object(course,'update_lesson',side_effect=replace):
+        update=secure.publish
+        def replace(args,directory,fd,guard,material,**kw):
+            course.update_lesson(directory,lambda data:data.update(resources=dict(status='absent',items=[])))
+            return update(args,directory,fd,guard,material,**kw)
+        with patch.object(secure,'publish',side_effect=replace):
             with self.assertRaisesRegex(ValueError,'concurrently'):
                 materials.resource(self.f.args(action='extract',resource_id=row['id'],expected_revision=None,notes=None))
         self.assertTrue(Path(row['origin']['raw_file']).is_file())

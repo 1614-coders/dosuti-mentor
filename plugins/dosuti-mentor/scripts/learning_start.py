@@ -44,23 +44,36 @@ CHOICE_MESSAGE = 'Этот проект (чат) будет продолжени
 CHOICES = ['Продолжить существующий курс.', 'Создать новый курс.', 'Работать без привязки к курсу.']
 
 
-def known_courses(home, project, profile):
+def known_courses(home, project, profile, *, include_unavailable=False, errors=None):
     """Only configured bindings of this learner; do not scan other courses or chats."""
     from learning_tools import read_json
     result = {}
     for location in dict.fromkeys(p for p in (home, project) if p is not None):
-        data, state = connection.read(location)
+        try:
+            data, state = connection.read(location)
+            if not isinstance(data,dict):raise ValueError('Invalid course connection object; preserve settings before repair')
+        except (ValueError,OSError,TypeError,KeyError,AttributeError) as error:
+            if errors is None:raise
+            errors.append(dict(location=str(location),reason=str(error)));continue
         values = list(state['chats'].values())
         if state['project_enabled']: values.append({k: data[k] for k in connection.FIELDS if k in data} | {'profile': data.get('profile', 'default')})
         for value in values:
             if value is None or value['profile'] != profile: continue
-            binding = connection.resolve(location, value)
+            binding = dict(value)
+            reason=None;meta={}
             try:
+                binding = connection.resolve(location, value)
                 connection.course_ready(binding)
                 meta = read_json(Path(binding['course_path']) / 'course.json')
-            except (ValueError, OSError, TypeError, KeyError): continue
+                if (not isinstance(meta,dict) or type(meta.get('schema_version')) is not int or meta['schema_version']!=1
+                        or any(not isinstance(meta.get(k),str) or not meta[k].strip() for k in ('id','title'))):
+                    raise ValueError('Course metadata changed or is invalid')
+            except (ValueError, OSError, RuntimeError, TypeError, KeyError, AttributeError) as error:
+                if not include_unavailable:continue
+                reason=str(error);meta={}
             identity = json.dumps(binding, sort_keys=True)
-            result[identity] = dict(course_path=binding['course_path'], title=meta['title'][:300], profile=profile, binding=binding)
+            result[identity] = dict(course_path=binding['course_path'], title=meta['title'][:300] if not reason else None, profile=profile, binding=binding)
+            if include_unavailable:result[identity].update(available=reason is None,reason=reason,course_id=meta.get('id'))
     return list(result.values())
 
 
@@ -80,7 +93,9 @@ def bound_state(state, home, requested_profile=None):
     check_profile(state, requested_profile)
     action = ('connection_unavailable' if state['enabled'] and state['course_status'] != 'available'
               else 'continue' if state['enabled'] else 'without_course')
-    return dict(learner_context(state, home), start_action=action)
+    result=dict(learner_context(state, home), start_action=action)
+    if action=='continue':result['next_action']='study_next'
+    return result
 
 
 def start(project=None, chat=None, home=None, *, choice=None, course=None, profile=None, expected_revision=None):
@@ -127,8 +142,11 @@ def start(project=None, chat=None, home=None, *, choice=None, course=None, profi
     if choice is None and has_profile:
         return choice_state(state, home, profile, chat)
     if choice == 'existing' and course is None:
+        from course_catalog import list_courses
+        catalog=list_courses(home=home,project=project,profile=profile)
         return dict(state, learner_home=str(home), start_action='select_course',
-                    courses=known_courses(home, project, profile), needs_chat_id=chat is None)
+                    courses=catalog['courses'],catalog_valid=catalog['valid'],catalog_errors=catalog['errors'],
+                    needs_chat_id=chat is None)
     if choice is not None and chat is None: raise ValueError('A real chat ID is required to save a chat choice')
     if choice is not None and (type(expected_revision) is not int or expected_revision < 0):
         raise ValueError('Course choice requires the current connection revision')
@@ -174,6 +192,7 @@ def start(project=None, chat=None, home=None, *, choice=None, course=None, profi
         result = dict(learner_context(result, home), start_action='continue' if choice == 'existing' else 'new_course')
         if choice == 'existing':
             result['start_message'] = 'Что именно хочешь изучать или делать в рамках этого курса в новом проекте?'
+            result['next_action']='study_next'
         return result
 
 
@@ -182,13 +201,24 @@ def main():
     parser.add_argument('--project', type=Path)
     parser.add_argument('--chat')
     parser.add_argument('--home', type=Path)
-    parser.add_argument('--choice', choices=['existing', 'new', 'none'])
+    mode=parser.add_mutually_exclusive_group()
+    mode.add_argument('--choice', choices=['existing', 'new', 'none'])
+    mode.add_argument('--list-courses',action='store_true',help='Read known courses of an explicitly selected learner without changing bindings')
+    parser.add_argument('--limit',type=int,default=10)
+    parser.add_argument('--offset',type=int,default=0)
     parser.add_argument('--course', type=Path)
     parser.add_argument('--profile')
     parser.add_argument('--expected-revision', type=int)
     args = parser.parse_args()
+    if args.list_courses and (args.course is not None or args.expected_revision is not None):
+        parser.error('--list-courses cannot be combined with course selection or a write revision')
+    if not args.list_courses and (args.limit!=10 or args.offset):parser.error('--limit/--offset require --list-courses')
     try:
-        print(json.dumps(start(args.project, args.chat, args.home, choice=args.choice, course=args.course, profile=args.profile, expected_revision=args.expected_revision), ensure_ascii=False))
+        if args.list_courses:
+            from course_catalog import list_courses
+            result=list_courses(home=args.home,project=args.project,profile=args.profile,limit=args.limit,offset=args.offset)
+        else:result=start(args.project, args.chat, args.home, choice=args.choice, course=args.course, profile=args.profile, expected_revision=args.expected_revision)
+        print(json.dumps(result,ensure_ascii=False))
     except (ValueError, OSError, RuntimeError) as error:
         print('Cannot start learning: ' + str(error), file=sys.stderr)
         return 1

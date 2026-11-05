@@ -153,7 +153,7 @@ class MediaSamples(unittest.TestCase):
         from PIL import Image
         source=self.media/'static.mp4';calls=[];original=Image.open
         def opened(path,*args,**kw):
-            if Path(path).parent.name=='frames':calls.append(str(path))
+            calls.append(getattr(path,'name',str(path)))
             return original(path,*args,**kw)
         with patch.object(Image,'open',opened):
             folder=screens.scan(source,self.root/'scan',0,2,.25,course.file_hash(source))

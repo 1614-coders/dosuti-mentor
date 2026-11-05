@@ -77,15 +77,16 @@ def navigation_windows(speech,frames,start,end):
     return windows
 
 
-def initialize_user_files(folder):
+def initialize_user_files(folder, writer=None):
     for name, initial in [('visual_notes.json', {'observations': [], 'uncertainties': []}),
                           ('progress.json', {'status': 'prepared', 'taught_topics': [],
                                              'last_taught_source_time': None, 'learner_answers': []})]:
         if not (folder / name).exists():
-            atomic_json_if_absent(folder / name, initial)
+            if writer is None: atomic_json_if_absent(folder / name, initial)
+            else: writer(folder / name, json.dumps(initial, ensure_ascii=False, indent=2, allow_nan=False))
 
 
-def build_packet(folder, display_folder=None, *, initialize=True):
+def build_packet(folder, display_folder=None, *, initialize=True, writer=None):
     folder = Path(folder).resolve()
     display_folder = Path(display_folder).resolve() if display_folder else folder
     manifest = json.loads((folder / 'manifest.json').read_text())
@@ -147,10 +148,11 @@ def build_packet(folder, display_folder=None, *, initialize=True):
               'speech_gaps':speech_gaps,
               'speech_gap_interpretation':'no_transcript_not_proof_of_silence',
               'visual_notes_file': 'visual_notes.json', 'progress_file': 'progress.json'}
-    atomic_json(folder / 'tutor_packet.json', packet)
-    atomic_text(folder / 'TUTOR_RULES.md', RULES)
+    write = writer or atomic_text
+    write(folder / 'tutor_packet.json', json.dumps(packet, ensure_ascii=False, indent=2, allow_nan=False))
+    write(folder / 'TUTOR_RULES.md', RULES)
     if initialize:
-        initialize_user_files(folder)
+        initialize_user_files(folder, writer)
     lines = ['# Внутренний источник для преподавания', '',
              f"Источник: {manifest['source']}. Обработано {stamp(start)}–{stamp(end)}.", '',
              'Сначала прочитай TUTOR_RULES.md, visual_notes.json и progress.json.',
@@ -164,7 +166,7 @@ def build_packet(folder, display_folder=None, *, initialize=True):
             lines.extend([f"[{item['id']} {stamp(item['start'])}–{stamp(item['end'])}; ASR не проверен{warning}] {item['text']}", ''])
         else:
             lines.extend([f"[{item['id']} около {stamp(seconds)}] Кадр: {item['absolute_path']}", ''])
-    atomic_text(folder / 'tutor_context.md', '\n'.join(lines))
+    write(folder / 'tutor_context.md', '\n'.join(lines))
     return packet
 
 

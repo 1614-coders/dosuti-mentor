@@ -16,6 +16,8 @@ from unittest.mock import patch
 SCRIPTS = Path(__file__).resolve().parents[1] / 'scripts'
 sys.path.insert(0, str(SCRIPTS))
 import course
+import safe_material_import as material
+import safe_prepared_import as prepared_io
 import tutor_packet
 from storage_lock import file_lock
 
@@ -23,7 +25,7 @@ from storage_lock import file_lock
 class PersistenceRegression(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
-        self.directory = Path(self.temp.name)
+        self.directory = Path(self.temp.name).resolve()
         self.path = self.directory / 'course'
         self.video = self.directory / 'lecture.mp4'
         self.video.write_bytes(b'Fixture video identity')
@@ -103,19 +105,19 @@ class PersistenceRegression(unittest.TestCase):
     def prepare_interleaved(self, fail=False):
         source = self.packet()
         ready, proceed = threading.Event(), threading.Event()
-        original = course.shutil.copytree
+        original = prepared_io.copy_frames
 
-        def delayed(src, dst, *args, **kw):
-            if Path(src).resolve() == (source / 'frames').resolve():
+        def delayed(attempt, src, dst, *args, **kw):
+            if Path(src).resolve() == source.resolve():
                 ready.set()
                 if not proceed.wait(timeout=5):
                     raise TimeoutError('Test did not release prepare')
                 if fail:
                     raise OSError('Simulated extraction failure')
-            return original(src, dst, *args, **kw)
+            return original(attempt, src, dst, *args, **kw)
 
         try:
-            with patch.object(course.shutil, 'copytree', delayed):
+            with patch.object(prepared_io, 'copy_frames', delayed):
                 with ThreadPoolExecutor(1) as pool:
                     future = pool.submit(course.prepare, self.args(import_prepared=source))
                     try:
@@ -244,15 +246,15 @@ class PersistenceRegression(unittest.TestCase):
 
     def test_two_preparations_keep_both_registered_fragments(self):
         source = self.packet()
-        original = course.shutil.copytree
+        original = prepared_io.copy_frames
         barrier = threading.Barrier(2)
 
-        def delayed(src, dst, *args, **kw):
-            result = original(src, dst, *args, **kw)
+        def delayed(attempt, src, dst, *args, **kw):
+            result = original(attempt, src, dst, *args, **kw)
             barrier.wait(timeout=5)
             return result
 
-        with patch.object(course.shutil, 'copytree', delayed):
+        with patch.object(prepared_io, 'copy_frames', delayed):
             with ThreadPoolExecutor(2) as pool:
                 futures = [pool.submit(course.prepare, self.args(import_prepared=source))
                            for _ in range(2)]

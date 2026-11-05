@@ -27,6 +27,14 @@ def reserve(path, directory=False):
     return path
 
 
+def preserve_attempt():
+    """Detach a ZIP attempt from path-based cleanup; return paths for its warning."""
+    state = _CURRENT.get()
+    paths = [str(path) for path, _ in state['owned']] if state else []
+    if state is not None: state['owned'].clear()
+    return paths
+
+
 def remove_owned(path):
     """Remove sealed attempt files and links themselves, never their targets."""
     info = path.lstat()
@@ -50,6 +58,10 @@ def references(value, path):
 
 
 def cleanup(state):
+    if state.get('safe') is not None:
+        if state['owned']:
+            print('Import leftovers preserved; ownership cannot be safely re-established by pathname', file=sys.stderr)
+        return
     if not state['owned']: return
     import course
     with file_lock(state['directory'] / '.lesson.lock'):
@@ -88,5 +100,8 @@ def importing(function):
                 raise
             cleanup(state)
             return result
-        finally: _CURRENT.reset(token)
+        finally:
+            try:
+                if state.get('safe') is not None: state['safe'].close()
+            finally: _CURRENT.reset(token)
     return run

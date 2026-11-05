@@ -391,88 +391,42 @@ def attach_local(args):
     elif not args.source:
         raise ValueError('Provide --source or --none')
     elif args.kind == 'code':
-        target = reserve(directory / 'code' / uuid.uuid4().hex[:12], directory=True)
+        if not github_url(args.source):
+            source = Path(args.source).expanduser().resolve()
+            if source.is_file() and (source.suffix.lower() == '.zip' or zipfile.is_zipfile(source)):
+                from safe_zip_import import attach_zip
+                return attach_zip(args, directory, source)
         if github_url(args.source):
-            command = ['git', 'clone', '--depth', '1']
-            if args.ref:
-                command += ['--branch', args.ref]
-            preparation_run(command + ['--', args.source, str(target)], check=True, timeout=600)
-            commit = preparation_run(['git', '-C', str(target), 'rev-parse', 'HEAD'], check=True, capture_output=True, text=True, timeout=30).stdout.strip()
-            origin = {'url': args.source, 'commit': commit, 'ref': args.ref}
-        else:
-            source = Path(args.source).expanduser().resolve()
-            target.parent.mkdir(parents=True, exist_ok=True)
-            if source.is_dir():
-                if target.is_relative_to(source):
-                    raise ValueError('Code source cannot contain the course storage')
-                shutil.copytree(source, target, symlinks=True, dirs_exist_ok=True,
-                    ignore=shutil.ignore_patterns('.git', '.venv', 'venv', 'node_modules', 'target', '__pycache__'))
-            elif source.is_file() and zipfile.is_zipfile(source):
-                with zipfile.ZipFile(source) as archive:
-                    from material_sources import validate_archive
-                    validate_archive(archive)
-                    for entry in archive.infolist():
-                        destination = (target / entry.filename).resolve()
-                        if not destination.is_relative_to(target.resolve()) or (entry.external_attr >> 16) & 0o170000 == 0o120000:
-                            raise ValueError('Archive contains unsafe paths or symbolic links')
-                    archive.extractall(target)
-            elif source.is_file():
-                shutil.copyfile(source, target / source.name)
-            else:
-                raise ValueError('Provide a code folder, archive, file or GitHub repository URL')
-            origin = getattr(args,'material_origin',None) or {'path': str(source)}
-        material = {'status': 'provided', 'snapshot': str(target), 'origin': origin,
-                    'lecture_match': 'unverified', 'revision': uuid.uuid4().hex}
-        # Links are copied as links, then rejected before opening any target file.
-        if (target / '.git').is_dir():
-            shutil.rmtree(target / '.git')
-        inventory, checksum = seal_snapshot(target)
-        material.update(inventory=inventory, content_sha256=checksum,
-                        integrity='inventory_recorded', sealed_at=now())
-    elif args.kind == 'homework':
-        source = Path(args.source).expanduser().resolve()
-        if not source.is_file():
-            raise ValueError('Save homework instructions as a local file first')
-        target = reserve(directory / 'homework' / (uuid.uuid4().hex[:8] + '-' + source.name))
-        target.parent.mkdir(exist_ok=True)
-        shutil.copyfile(source, target)
-        material = {'status': 'provided', 'file': str(target), 'sha256': file_hash(target),
-                    'origin': getattr(args,'material_origin',None) or {'source':str(source)}}
-        target.chmod(target.stat().st_mode & ~0o222)
+            from safe_material_import import attach_github
+            return attach_github(args, directory)
+        from safe_material_import import attach
+        return attach(args, directory)
+    elif args.kind == 'resources' and source_kind(args.source) == 'remote':
+        item = {'id': uuid.uuid4().hex, 'source': args.source, 'kind': args.resource_type, 'status': 'registered_not_read'}
     else:
-        if source_kind(args.source) == 'remote':
-            item = {'source': args.source, 'kind': args.resource_type, 'status': 'registered_not_read'}
-        else:
-            source = Path(args.source).expanduser().resolve()
-            if not source.is_file():
-                raise ValueError('Resource must be an HTTPS URL or a local file')
-            target = reserve(directory / 'resources' / (uuid.uuid4().hex[:8] + '-' + source.name))
-            target.parent.mkdir(exist_ok=True)
-            shutil.copyfile(source, target)
-            item = {'source': str(target), 'kind': args.resource_type, 'status': 'downloaded',
-                    'origin': {'source':str(source),'raw_file':str(target),'sha256':file_hash(target),'size':target.stat().st_size,'media_type':''}}
-            target.chmod(target.stat().st_mode & ~0o222)
-        item['id'] = uuid.uuid4().hex
+        from safe_material_import import attach
+        return attach(args, directory)
     if args.kind == 'homework':
         material['revision'] = homework_revision(material)
 
-    def publish(data):
-        if item is not None:
-            data['resources'] = {'status': 'provided',
-                                 'items': data['resources'].get('items', []) + [item]}
-        else:
-            repository = getattr(args, 'repository', None)
-            if args.kind == 'code' and repository is not None:
-                repositories = data.setdefault('code_repositories', {})
-                material['history'] = material_history(repositories.get(repository, {}))
-                repositories[repository] = material
-                return
-            if args.kind in ('code', 'homework'):
-                material['history'] = material_history(data[args.kind])
-            data[args.kind] = material
-
-    update_lesson(directory, publish)
+    update_lesson(directory, lambda data: publish_attachment(data, args, material, item))
     print('Attached:', args.kind)
+
+
+def publish_attachment(data, args, material, item=None):
+    if item is not None:
+        data['resources'] = {'status': 'provided',
+                             'items': data['resources'].get('items', []) + [item]}
+    else:
+        repository = getattr(args, 'repository', None)
+        if args.kind == 'code' and repository is not None:
+            repositories = data.setdefault('code_repositories', {})
+            material['history'] = material_history(repositories.get(repository, {}))
+            repositories[repository] = material
+            return
+        if args.kind in ('code', 'homework'):
+            material['history'] = material_history(data[args.kind])
+        data[args.kind] = material
 
 
 def download_video(directory, data, fragments=4, site_timeout=1800, quality='best'):
@@ -512,8 +466,8 @@ def checked_video(directory, data, fragments=4, site_timeout=1800, quality='best
 
 
 @managed_operation
-@tracked
 @importing
+@tracked
 def prepare(args):
     from model_readiness import checked_model, ModelNotReady, repair_type
     from publication import publish_job
@@ -527,6 +481,8 @@ def prepare(args):
     base_key = job_key = None
     try:
         if args.import_prepared:
+            from safe_material_import import current
+            import_attempt = current(directory)
             phase('publish')
             source = args.import_prepared.resolve()
             imported_manifest = read(source / 'manifest.json')
@@ -541,15 +497,8 @@ def prepare(args):
             check_local_video(data['video'])
             source_matches(imported_manifest, data['video']['sha256'])
             verify_evidence(source, imported_manifest)
-            target = reserve(directory / 'prepared' / ('import-' + uuid.uuid4().hex[:8]), directory=True)
-            for name in ['manifest.json', 'transcript.json']:
-                shutil.copyfile(source / name, target / name)
-            shutil.copytree(source / 'frames', target / 'frames')
-            if (source / 'visual_notes.json').exists():
-                shutil.copyfile(source / 'visual_notes.json', target / 'visual_notes.json')
-            verify_evidence(target, read(target / 'manifest.json'))
-            from tutor_packet import build_packet
-            build_packet(target)
+            from safe_prepared_import import stage
+            target = stage(args, directory, source)
         else:
             from asr_vocabulary import recognition_prompt
             prompt = recognition_prompt(getattr(args, 'prompt', ''), getattr(args, 'vocabulary_file', None))
@@ -648,7 +597,8 @@ def prepare(args):
                 latest['processing_jobs'][base_key].update(status='complete', activation_status='active')
             latest.pop('last_processing_error', None)
             activated.append(True)
-        update_lesson(directory, publish)
+        if args.import_prepared: import_attempt.publish(args, change=publish)
+        else: update_lesson(directory, publish)
         message = ('Prepared for assistant:' if activated else
                    'Prepared candidate; explicit selection preserved:' if deferred else
                    'Superseded job saved but not activated:')
@@ -662,7 +612,19 @@ def prepare(args):
                 current.update(status='interrupted' if isinstance(error, KeyboardInterrupt) else 'failed',
                                error=type(error).__name__ + ': ' + str(error)[:300])
             latest['last_processing_error']=type(error).__name__ + ': ' + str(error)[:300]
-        update_lesson(directory,failed)
+        if args.import_prepared:
+            # Never use a possibly replaced lesson pathname to report failure.
+            from material_import import _CURRENT
+            attempt = _CURRENT.get().get('safe')
+            if attempt is not None:
+                try:
+                    attempt.check()
+                    from safe_zip_import import publish as publish_failure
+                    publish_failure(args, directory, attempt.fd, attempt.guard, None, change=failed)
+                except Exception as failure:
+                    error.add_note('Import error metadata not saved: ' + str(failure))
+                    print('Import leftovers preserved; error metadata could not be safely saved:', failure, file=sys.stderr)
+        else: update_lesson(directory,failed)
         raise
 
 
@@ -806,7 +768,7 @@ def make_portable(args):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest='command', required=True)
-    for name in ['init', 'add-lesson', 'attach', 'prepare', 'progress', 'bind', 'status', 'context', 'frame', 'scan-screen', 'diff-code', 'history', 'make-portable', 'settings', 'resume', 'topic', 'search', 'project-map', 'resource', 'code-stage', 'term-note', 'storage-report', 'download-plan', 'doctor', 'cleanup-plan', 'cleanup-progress', 'cleanup-job', 'fragments', 'intent', 'diagnostic', 'unit', 'learn-unit', 'research', 'project-timeline', 'study-next', 'career', 'career-route', 'ocr-frame', 'compact', 'spoken-homework', 'preparation-status', 'preparation-step', 'preparation-cancel', 'preparation-summary', 'material-status']:
+    for name in ['init', 'add-lesson', 'attach', 'prepare', 'progress', 'bind', 'status', 'context', 'frame', 'scan-screen', 'diff-code', 'history', 'make-portable', 'settings', 'resume', 'topic', 'search', 'project-map', 'resource', 'code-stage', 'term-note', 'storage-report', 'download-plan', 'doctor', 'cleanup-plan', 'cleanup-progress', 'cleanup-job', 'fragments', 'intent', 'diagnostic', 'unit', 'learn-unit', 'research', 'project-timeline', 'study-next', 'career', 'career-route', 'topic-queue', 'ocr-frame', 'compact', 'spoken-homework', 'preparation-status', 'preparation-step', 'preparation-cancel', 'preparation-summary', 'material-status']:
         command = commands.add_parser(name)
         command.add_argument('--course', type=Path, required=True)
         from cli_output import COMMANDS
@@ -814,10 +776,10 @@ def main():
         if name in ('diagnostic','learn-unit'):
             command.add_argument('--event-revision',type=int,action='append',help='Read validated evidence by revision (repeatable)')
             command.add_argument('--history-before',type=int,help='Read an older history page; exclusive revision bound')
-        if name in ['status', 'progress', 'bind', 'context', 'history', 'settings', 'resume', 'intent', 'diagnostic', 'learn-unit', 'study-next', 'career-route', 'cleanup-progress']:
+        if name in ['status', 'progress', 'bind', 'context', 'history', 'settings', 'resume', 'intent', 'diagnostic', 'learn-unit', 'study-next', 'career-route', 'topic-queue', 'cleanup-progress']:
             command.add_argument('--profile', default='default')
             command.add_argument('--learner-home', type=Path, help='Explicit managed home for general learner preferences')
-        if name in ['status','context','resume','intent','diagnostic','learn-unit','study-next','career-route']:
+        if name in ['status','context','resume','intent','diagnostic','learn-unit','study-next','career-route','topic-queue']:
             command.add_argument('--session',help='Stable ID for this learning session/chat task')
         if name in ['status', 'context', 'settings', 'learn-unit']:
             command.add_argument('--profiles-dir', type=Path, help='Optional shared personal preferences directory outside plugin')
@@ -837,10 +799,18 @@ def main():
             command.add_argument('action',choices=['draft','plan','apply','status','reopen'])
             command.add_argument('--memory-file',type=Path)
             command.add_argument('--plan-file',type=Path)
+        elif name == 'topic-queue':
+            command.add_argument('--event-file',type=Path)
+            command.add_argument('--expected-revision',type=int)
+            command.add_argument('--topic-id',help='Read the complete saved answers for one queued topic')
+            command.add_argument('--limit',type=int,default=10)
+            command.add_argument('--queue-offset',type=int,default=0)
         elif name == 'career-route':
             command.add_argument('--route-file',type=Path)
             command.add_argument('--expected-revision',type=int)
             command.add_argument('--reason')
+            command.add_argument('--market-file',type=Path,help='Explicit career search context, learner consent, or result')
+            command.add_argument('--expected-market-revision',type=int)
             command.add_argument('--history-limit',type=int,default=0)
         elif name == 'career':
             command.add_argument('--sample-id',required=True)
@@ -848,6 +818,8 @@ def main():
             command.add_argument('--expected-revision',type=int)
         elif name == 'study-next':
             command.add_argument('--limit',type=int,default=5)
+            command.add_argument('--knowledge-map',action='store_true',help='Explain saved knowledge and evidence on request; read-only')
+            command.add_argument('--knowledge-offset',type=int,default=0,help='Read another page of knowledge sections; requires --knowledge-map')
         elif name == 'project-timeline':
             group=command.add_mutually_exclusive_group()
             group.add_argument('--timeline-file',type=Path)
@@ -1045,6 +1017,9 @@ def main():
             elif args.command=='ocr-frame':
                 from screen_ocr import view
                 print(json.dumps(view(args),ensure_ascii=False,indent=2))
+            elif args.command=='topic-queue':
+                from topic_queue import topic_queue
+                print(json.dumps(topic_queue(args),ensure_ascii=False,indent=2))
             elif args.command=='career-route':
                 from career_route import route
                 print(json.dumps(route(args),ensure_ascii=False,indent=2))

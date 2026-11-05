@@ -7,8 +7,10 @@
     {
       "name": "dosuti-mentor",
       "source": {
-        "source": "local",
-        "path": "./plugins/dosuti-mentor"
+        "source": "git-subdir",
+        "url": "https://github.com/1614-coders/dosuti-mentor.git",
+        "path": "./plugins/dosuti-mentor",
+        "ref": "main"
       },
       "policy": {
         "installation": "AVAILABLE",

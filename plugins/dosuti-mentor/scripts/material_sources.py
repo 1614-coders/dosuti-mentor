@@ -49,28 +49,21 @@ def text_content(path,media_type=''):
 
 
 def acquire(directory,source):
-    folder=reserve(Path(directory)/'materials'/uuid.uuid4().hex,directory=True)
-    try:
-        remote=source_kind(source)=='remote'
-        name=Path(urlsplit(source).path).name if remote else Path(source).name
-        name=name if name and name not in ('.','..') else 'material'
-        raw=folder/name
-        if remote:
-            parsed=urlsplit(source)
-            if parsed.username or parsed.password:raise ValueError('Material URL must not contain credentials')
-            p=subprocess.run(['curl','--fail','--location','--silent','--show-error','--connect-timeout','15','--max-time','120','--max-filesize',str(MAX_BYTES),'--max-redirs','5','--proto','=http,https','--proto-redir','=http,https','--output',str(raw),'--write-out','%{json}','--',source],capture_output=True,text=True,timeout=130)
-            if p.returncode:raise ValueError('Material download failed (HTTP, timeout or size limit); provide a public file or local copy')
-            info=json.loads(p.stdout);effective=info.get('url_effective',source);media=info.get('content_type') or ''
-        else:
-            original=Path(source).expanduser()
-            if original.is_symlink() or not original.is_file():raise ValueError('Material must be an ordinary local file')
-            if original.stat().st_size>MAX_BYTES:raise ValueError('Material exceeds 32 MiB')
-            shutil.copyfile(original,raw);effective=None;media=''
-        if raw.stat().st_size>MAX_BYTES:raise ValueError('Material exceeds 32 MiB')
-        checksum=file_hash(raw);raw.chmod(raw.stat().st_mode & ~0o222)
-        return raw,dict(source=source,effective_url=effective,media_type=media,raw_file=str(raw.resolve()),sha256=checksum,size=raw.stat().st_size)
-    except BaseException:
-        remove_owned(folder);raise
+    from safe_material_import import current
+    attempt=current(directory)
+    folder,fd=attempt.fresh('materials')
+    remote=source_kind(source)=='remote'
+    name=Path(urlsplit(source).path).name if remote else Path(source).name
+    name=name if name and name not in ('.','..') else 'material'
+    raw=folder/name
+    if remote:
+        raw,info=attempt.download(source,folder,fd,name)
+        effective=info.get('url_effective',source);media=info.get('content_type') or ''
+        size=raw.stat().st_size;checksum=attempt.files[raw.absolute()][3]
+    else:
+        copied=attempt.copy(source,fd,name,destination=raw)
+        size=copied['size'];checksum=copied['sha256'];effective=None;media=''
+    return raw,dict(source=source,effective_url=effective,media_type=media,raw_file=str(raw),sha256=checksum,size=size)
 
 
 def validate_archive(archive):
@@ -90,7 +83,7 @@ def attach_material(args):
     raw,origin=acquire(directory,args.source)
     target=raw
     if args.kind=='homework':
-        value,method=text_content(raw,origin['media_type']);target=reserve(raw.parent/('extracted-'+uuid.uuid4().hex+'.txt'));target.write_text(value,encoding='utf-8',newline='');origin['extraction']=method
+        value,method=text_content(raw,origin['media_type']);origin['extraction']=method
     elif not zipfile.is_zipfile(raw):
         with raw.open('rb') as stream:signature=stream.read(5)
         if signature==b'%PDF-' or 'pdf' in origin['media_type'].lower() or raw.suffix.lower()=='.pdf':
@@ -99,8 +92,8 @@ def attach_material(args):
         if 'html' in origin['media_type'].lower() or raw.read_bytes()[:1024].lstrip().lower().startswith((b'<!doctype html',b'<html')):raise ValueError('Code URL returned HTML; provide a raw code file or ZIP')
         text_content(raw,origin['media_type'])
     clone=deepcopy(args);clone.source=str(target);clone.material_origin=origin
+    if args.kind=='homework':clone.material_text=value
     c.attach_local(clone)
-    if target!=raw:target.unlink(missing_ok=True)
 
 
 def resource_revision(item):
@@ -170,8 +163,10 @@ def _resource(args):
                 if integrity(item['extracted_file'],item['text_sha256'])!='verified':raise ValueError('Extracted text changed; attach a new trusted version')
             else:
                 value,method=text_content(raw,origin.get('media_type',''))
-                target=reserve(raw.parent/('text-'+uuid.uuid4().hex+'.txt'));target.write_text(value,encoding='utf-8',newline='');target.chmod(target.stat().st_mode & ~0o222)
-                item.update(extracted_file=str(target.resolve()),text_sha256=file_hash(target),extraction=method,status='extracted_not_reviewed')
+                from safe_material_import import current
+                attempt=current(directory);text_folder,parent=attempt.fresh('materials')
+                target,checksum=attempt.text(text_folder,parent,'text-'+uuid.uuid4().hex+'.txt',value)
+                item.update(extracted_file=str(target),text_sha256=checksum,extraction=method,status='extracted_not_reviewed')
             if getattr(args,'visual_pages',None) is not None:
                 if item.get('extraction')!='pdf_text_layer_v1':raise ValueError('Page images require a PDF resource')
                 from pdf_visuals import prepare
@@ -192,5 +187,8 @@ def _resource(args):
             from pdf_visuals import verify
             verify(item['visuals'],item['origin']['raw_file'],item['origin']['sha256'])
         current.clear();current.update(item)
-    c.update_lesson(directory,update)
+    from material_import import _CURRENT
+    active=_CURRENT.get().get('safe')
+    if active is not None:active.publish(args,change=update)
+    else:c.update_lesson(directory,update)
     return describe(c.read(directory/'lesson.json')['resources'])

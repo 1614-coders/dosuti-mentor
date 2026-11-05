@@ -116,8 +116,9 @@ class ScreenEvidence(unittest.TestCase):
     def test_failed_extraction_leaves_no_published_scan(self):
         with patch.object(screens,'preparation_run',side_effect=subprocess.CalledProcessError(1,['ffmpeg'])):
             with self.assertRaises(subprocess.CalledProcessError):self.scan()
-        self.assertEqual(list((self.root/'scans').glob('scan-*')),[])
-        self.assertEqual(list((self.root/'scans').glob('.pending-*')),[])
+        self.assertFalse(list((self.root/'scans').glob('scan-*/completion.json')))
+        # Failed external-writer attempts are retained, never recursively deleted.
+        self.assertEqual(len(list((self.root/'scans').glob('scan-*'))),1)
         self.assertTrue((self.scan()/'screen.json').is_file())
 
     def test_changed_source_during_scan_is_not_published(self):
@@ -126,7 +127,7 @@ class ScreenEvidence(unittest.TestCase):
             rows=real(*a,**kw);self.video.write_bytes((self.media/'static.mp4').read_bytes());return rows
         with patch.object(screens,'extract_frames',mutate):
             with self.assertRaisesRegex(ValueError,'changed during'):self.scan()
-        self.assertEqual(list((self.root/'scans').glob('scan-*')),[])
+        self.assertFalse(list((self.root/'scans').glob('scan-*/completion.json')))
 
     def test_corrupt_saved_frame_is_rejected_on_repeat(self):
         folder=self.scan();r=course.read(folder/'screen.json')

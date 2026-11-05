@@ -70,14 +70,23 @@ class VideoHashReuse(unittest.TestCase):
         self.video.unlink();(self.assets/'download.json').unlink()
         self.data['video'].pop('path');original=hashlib.file_digest;hashed=[]
         def count(stream,*args,**kwargs):
-            hashed.append(Path(stream.name));return original(stream,*args,**kwargs)
+
+            if isinstance(stream.name, (str, os.PathLike)):
+                hashed.append(Path(stream.name))
+            return original(stream,*args,**kwargs)
         def fetch(url,target,*args,**kwargs):target.write_bytes(b'a'*4096)
         with patch.object(video_sources,'curl',fetch), patch.object(video_sources,'validate_media'), patch.object(hashlib,'file_digest',count):
             video,checksum=self.read()
         self.assertEqual(checksum,self.sha)
         self.assertTrue(video.exists());self.assertEqual(hashed.count(video),1)
         self.assertEqual(len(hashed),2)
-        self.assertEqual(list(self.assets.glob('.fetch-*')),[])
+        # Retention is a safety policy, not an entry in the verification cache.
+        retained=list(self.assets.glob('.fetch-*'))
+        self.assertEqual(len(retained),1)
+        self.assertEqual(list(retained[0].iterdir()),[])
+        verified=video_sources.verification_paths(self.folder,self.data['video'])
+        self.assertTrue(verified)
+        self.assertTrue(all(not path.is_relative_to(retained[0]) for path in verified))
 
     @unittest.skipIf(os.name=='nt','ctime is not a change counter on Windows')
     def test_in_operation_same_size_and_restored_mtime_still_detected(self):

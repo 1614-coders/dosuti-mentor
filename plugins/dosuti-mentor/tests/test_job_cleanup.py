@@ -37,6 +37,18 @@ class JobCleanup(unittest.TestCase):
     def test_pending_job_protected(self):
         d=self.data();d['processing_jobs']['base']['status']='pending';course.save(self.f.lesson/'lesson.json',d)
         with self.assertRaises(ValueError):self.plan()
+    def test_array_publication_marker_reports_controlled_cli_error_and_keeps_payload(self):
+        marker=self.pub/'publication.json';marker.write_bytes(b'[]')
+        before=(self.work/'audio.wav').read_bytes();output=io.StringIO();error=io.StringIO()
+        arguments=['course.py','cleanup-job','--course',str(self.f.path),
+                   '--lesson','lesson-01','--job-key',self.key]
+        with patch.object(sys,'argv',arguments), contextlib.redirect_stdout(output), contextlib.redirect_stderr(error):
+            with self.assertRaises(SystemExit) as stopped:course.main()
+        self.assertEqual(stopped.exception.code,1)
+        self.assertIn('No intact matching registered publication; preserve recovery data',error.getvalue())
+        self.assertNotIn('Traceback',error.getvalue())
+        self.assertEqual(marker.read_bytes(),b'[]')
+        self.assertEqual((self.work/'audio.wav').read_bytes(),before)
     def test_referenced_payload_protected(self):
         d=self.data();d['future_path']=str(self.work/'frames');course.save(self.f.lesson/'lesson.json',d)
         with self.assertRaises(ValueError):self.plan()

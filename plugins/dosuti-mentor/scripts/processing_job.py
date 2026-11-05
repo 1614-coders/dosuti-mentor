@@ -7,7 +7,16 @@ import shutil
 import subprocess
 import uuid
 import wave
-from atomic_files import atomic_json, atomic_text
+from worker_io import current as job_io
+
+
+def atomic_json(path, value):
+    job_io(path.parent).json(path.name, value)
+
+
+def atomic_text(path, value):
+    job_io(path.parent).text(path.name, value)
+
 from model_readiness import inspect_model, model_lock
 from source_integrity import file_hash, source_matches, evidence_hashes, verify_evidence, verification_session, SourceDrift
 from storage_lock import file_lock
@@ -33,19 +42,8 @@ def persist(folder, state):
 
 
 def quarantine_attempt(out, preserved):
-    """Keep failed derived files, never adopt them as a new attempt's cache."""
-    from profile_storage import checked
-    checked(out, True); checked(out / '.unverified', True)
-    target = out / '.unverified' / uuid.uuid4().hex
-    target.mkdir(parents=True)
-    names = ('manifest.json', 'tutor_packet.json', 'checkpoint.json', *MANAGED,
-             'audio.staging.wav', '.frames-staging')
-    for name in dict.fromkeys(names):
-        if name in preserved: continue
-        path = out / name
-        if path.exists() or path.is_symlink():
-            checked(path, path.is_dir())
-            path.replace(target / name)
+    """Preserve failed derived files through anchored copies, never rename/delete them."""
+    job_io(out).quarantine(preserved)
 
 
 def process_with_retry(args, ffmpeg, out, report):
@@ -78,32 +76,39 @@ def process_with_retry(args, ffmpeg, out, report):
 
 
 def run_job(args, ffmpeg):
-    out = args.output.resolve()
-    out.mkdir(parents=True, exist_ok=True)
-    with file_lock(out / '.processing.lock'):
-        state = None
-        from processing_status import Reporter
-        report = Reporter(out)
-        report.set('verify')
-        try:
-            state = process_with_retry(args, ffmpeg, out, report.set)
-            if 'packet' in state['stages']:
-                from tutor_packet import initialize_user_files
-                initialize_user_files(out)
-                state['status'] = 'complete'
-                persist(out, state)
-            terminal = ('complete' if state.get('status') == 'complete' else
-                        'recognized' if 'recognition' in state['stages'] else 'prepared')
-            report.set(terminal, 'complete')
-            return state
-        except BaseException as error:
-            report.set(report.data['stage'], 'interrupted' if isinstance(error, (KeyboardInterrupt, SystemExit)) else 'failed', error)
-            checkpoint = out / 'checkpoint.json'
-            if checkpoint.is_file():
-                state = json.loads(checkpoint.read_text())
-                state['last_error'] = type(error).__name__ + ': ' + str(error)[:300]
-                persist(out, state)
-            raise
+    from worker_io import session
+    with session(args.output) as io:
+        out = io.out
+        with file_lock(out / '.processing.lock', directory_fd=io.fd):
+            io.enroll()
+            state = None
+            from processing_status import Reporter
+            report = Reporter(out, writer=lambda value: io.json('processing-status.json', value))
+            report.set('verify')
+            try:
+                state = process_with_retry(args, ffmpeg, out, report.set)
+                if 'packet' in state['stages']:
+                    io.initialize_user_files()
+                    state['status'] = 'complete'
+                    persist(out, state)
+                terminal = ('complete' if state.get('status') == 'complete' else
+                            'recognized' if 'recognition' in state['stages'] else 'prepared')
+                io.check(); report.set(terminal, 'complete')
+                io.owner.published = True
+                return state
+            except BaseException as error:
+                try:
+                    io.owner.guard.check()
+                    report.set(report.data['stage'], 'interrupted' if isinstance(error, (KeyboardInterrupt, SystemExit)) else 'failed', error)
+                    if (out / 'checkpoint.json').is_file():
+                        state = io.read_json('checkpoint.json')
+                        if io.force_fresh:
+                            state['stages'] = {}; state.pop('media', None); state['status'] = 'unverified'
+                        state['last_error'] = type(error).__name__ + ': ' + str(error)[:300]
+                        persist(out, state)
+                except Exception as failure:
+                    error.add_note('Worker error metadata preserved without unsafe retry: ' + str(failure))
+                raise
 
 
 @verification_session(paths=lambda args, ffmpeg, out, report=None: [args.video] if CACHE_SOURCE_HASHES else [])
@@ -115,11 +120,14 @@ def process(args, ffmpeg, out, report=lambda stage, **details: None):
     checksum = file_hash(args.video)
     inputs = dict(start=args.start, duration=args.duration, frame_every=args.frame_every,
                   audio_track=getattr(args, 'audio_track', None), audio_channel=getattr(args, 'audio_channel', None))
+    io = job_io(out)
+    fresh = io.force_fresh
+    io.force_fresh = False
     checkpoint = out / 'checkpoint.json'
-    if checkpoint.exists():
+    if checkpoint.exists() and not fresh:
         if not args.resume:
             raise ValueError('Use --resume for this existing job, or a fresh output directory')
-        state = json.loads(checkpoint.read_text())
+        state = io.read_json('checkpoint.json')
         source_matches(state, checksum)
         if state.get('pipeline_version') != PIPELINE_VERSION:
             raise ValueError('Legacy processing timeline; use a fresh output or course.py prepare --rebuild')
@@ -128,7 +136,7 @@ def process(args, ffmpeg, out, report=lambda stage, **details: None):
     else:
         state = dict(schema_version=2, pipeline_version=PIPELINE_VERSION, source_sha256=checksum, inputs=inputs, stages={})
         manifest = out / 'manifest.json'
-        if manifest.exists():
+        if manifest.exists() and not fresh:
             if not args.resume:
                 raise ValueError('Use a fresh output directory or --resume')
             old = json.loads(manifest.read_text())
@@ -143,15 +151,11 @@ def process(args, ffmpeg, out, report=lambda stage, **details: None):
             state['media'] = old['media']
             state['stages']['audio'] = dict(sha256=old['audio_sha256'], duration=pcm_duration(out / 'audio.wav'), quality=old['audio_quality'])
             state['stages']['frames'] = dict(items=old['frames'], hashes={f['file']: old['evidence_sha256'][f['file']] for f in old['frames']})
-        elif any((out / name).exists() for name in MANAGED if name not in USER_FILES):
+        elif not fresh and any((out / name).exists() for name in MANAGED if name not in USER_FILES):
             if not args.resume:
                 raise ValueError('Unfinished files without a checkpoint; use --resume to preserve and rebuild them')
-            quarantine = out / '.unverified' / uuid.uuid4().hex
-            quarantine.mkdir(parents=True)
-            for name in MANAGED:
-                if name in USER_FILES: continue
-                if (out / name).exists():
-                    (out / name).replace(quarantine / name)
+            quarantine_attempt(out, set(USER_FILES))
+            io.force_fresh = False
             print('Preserved unverified old files; rebuilding from pinned source', flush=True)
         persist(out, state)
     stages = state['stages']
@@ -176,11 +180,11 @@ def process(args, ffmpeg, out, report=lambda stage, **details: None):
         print('Extracting audio…', flush=True)
         with nullcontext():
             temporary, quality = extract_audio(args.video.resolve(), out, args.start, duration, media, ffmpeg,
-                audio_track=inputs['audio_track'], audio_channel=inputs['audio_channel'], **extraction_options)
+                audio_track=inputs['audio_track'], audio_channel=inputs['audio_channel'], storage=io, **extraction_options)
             pcm_duration(temporary)
             if file_hash(args.video) != checksum:
                 raise ValueError('Video changed during extraction; use a fresh output directory')
-            temporary.replace(out / 'audio.wav')
+            io.publish_audio(temporary)
             stages['audio'] = dict(sha256=file_hash(out / 'audio.wav'), duration=duration, quality=quality,
                                    execution=limits)
             persist(out, state)
@@ -188,26 +192,18 @@ def process(args, ffmpeg, out, report=lambda stage, **details: None):
         raise ValueError('Prepared audio integrity changed; use course.py prepare --rebuild')
     if 'frames' not in stages:
         report('frames')
-        staging = out / '.frames-staging'
-        if staging.exists():
-            shutil.rmtree(staging)
-        staging.mkdir()
+        staging = io.frames_folder()
         print('Extracting screen frames…', flush=True)
-        try:
-            frames=(extract_frames(args.video,staging,args.start,stages['audio']['duration'],args.frame_every,ffmpeg,
-                scene_changes=True,**extraction_options) if media.get('video') else [])
-            if file_hash(args.video) != checksum:
-                raise ValueError('Video changed during extraction; use a fresh output directory')
-            if (out / 'frames').exists():
-                shutil.rmtree(out / 'frames')
-            staging.replace(out / 'frames')
-            for frame in frames:
-                frame['file']='frames/'+frame['file']
-            stages['frames'] = dict(items=frames, hashes=evidence_hashes(out, dict(frames=frames)), execution=limits,
-                selection='scene_or_periodic_v1' if media.get('video') else 'audio_only')
-            persist(out, state)
-        finally:
-            if staging.exists():shutil.rmtree(staging)
+        frames=(extract_frames(args.video,staging,args.start,stages['audio']['duration'],args.frame_every,ffmpeg,
+            scene_changes=True,storage=io,**extraction_options) if media.get('video') else [])
+        io.check()
+        if file_hash(args.video) != checksum:
+            raise ValueError('Video changed during extraction; use a fresh output directory')
+        prefix = staging.relative_to(out).as_posix()
+        for frame in frames: frame['file']=prefix+'/'+frame['file']
+        stages['frames'] = dict(items=frames, hashes=evidence_hashes(out, dict(frames=frames)), execution=limits,
+            selection='scene_or_periodic_v1' if media.get('video') else 'audio_only')
+        persist(out, state)
     metadata = dict(source=args.video.name, source_path=str(args.video.resolve()), source_size=args.video.stat().st_size,
         source_sha256=checksum, source_revision='sha256:' + checksum, start=args.start,
         requested_duration=args.duration, actual_duration=stages['audio']['duration'],
@@ -310,7 +306,7 @@ def process(args, ffmpeg, out, report=lambda stage, **details: None):
         report('packet')
         atomic_json(out / 'manifest.json', metadata)
         from tutor_packet import build_packet
-        build_packet(out, initialize=False)
+        build_packet(out, initialize=False, writer=lambda path, text: io.text(path.name, text))
         stages['packet'] = dict(sha256=file_hash(out / 'tutor_packet.json'))
     state.pop('last_error', None)
     persist(out, state)

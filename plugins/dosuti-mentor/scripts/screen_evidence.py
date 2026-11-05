@@ -3,6 +3,8 @@ from copy import deepcopy
 import hashlib
 import json
 import math
+import os
+import tempfile
 from pathlib import Path
 import re
 import shutil
@@ -12,6 +14,7 @@ import uuid
 from atomic_files import atomic_json
 from source_integrity import file_hash, safe_asset, source_matches
 from storage_lock import file_lock
+from temporary_retention import preserve_temporary
 
 
 def bounds(start, duration, sample_every):
@@ -21,19 +24,35 @@ def bounds(start, duration, sample_every):
         raise ValueError('Screen start must be nonnegative; duration/interval positive')
 
 
-def extract_frames(video, folder, start, duration, sample_every, ffmpeg, threads=None, scene_changes=False):
+def extract_frames(video, folder, start, duration, sample_every, ffmpeg, threads=None, scene_changes=False, storage=None):
     bounds(start,duration,sample_every)
     folder = Path(folder)
-    folder.mkdir(parents=True,exist_ok=True)
+    if storage is None: folder.mkdir(parents=True,exist_ok=True)
     # Limit the input, so a filter with no later output does not decode the rest of a long lecture.
     changes=f"+gt(scene,0.02)*gte(t-prev_selected_t,{min(sample_every,.5)})" if scene_changes else ''
     selection=f"select='lt(t,{duration})*(isnan(prev_selected_t)+gte(t-prev_selected_t,{sample_every}){changes})',showinfo"
-    result=preparation_run([ffmpeg,'-hide_banner','-loglevel','info','-y',
-        *(['-threads', str(threads), '-filter_threads', str(threads)] if threads else []),
-        '-ss',str(start),'-t',str(duration),'-i',str(video),'-an','-vf',selection,
-        '-fps_mode','vfr','-q:v','2',
-        *(['-threads', str(threads)] if threads else []),str(folder/'%05d.jpg')],
-        check=False,capture_output=True,text=True,process_group=False, timeout=max(120, duration * 10))
+    with tempfile.TemporaryFile() as spool:
+        result=preparation_run([ffmpeg,'-hide_banner','-loglevel','info','-y',
+            *(['-threads', str(threads), '-filter_threads', str(threads)] if threads else []),
+            '-ss',str(start),'-t',str(duration),'-i',str(video),'-an','-vf',selection,
+            '-fps_mode','vfr','-q:v','2',
+            *(['-threads', str(threads)] if threads else []),*(['-frames:v','5000','-fs',str(256*1024*1024),'-f','image2pipe','-c:v','mjpeg','pipe:1'] if storage else [str(folder/'%05d.jpg')])],
+            check=False,text=True,process_group=False, timeout=max(120, duration * 10),
+            **(dict(stdout=spool,stderr=subprocess.PIPE) if storage else dict(capture_output=True)))
+        if storage:
+            if not os.fstat(spool.fileno()).st_size: raise ValueError('No video frames in the requested interval')
+            if os.fstat(spool.fileno()).st_size >= 256*1024*1024: raise ValueError('Frame stream exceeds 256 MiB')
+            import av
+            spool.seek(0)
+            count=0
+            with av.open(spool,format='mjpeg') as packets:
+                for packet in packets.demux(video=0):
+                    if not packet.size: continue
+                    count+=1
+                    content=bytes(packet)
+                    if count>=5000 or len(content)>32*1024*1024 or packet.is_corrupt or not content.startswith(b'\xff\xd8') or not content.endswith(b'\xff\xd9'):
+                        raise ValueError('Invalid or oversized frame stream; nothing accepted')
+                    storage.blob(folder,f'{count:05d}.jpg',content)
     stamps=[(int(n),float(t)) for n,t in re.findall(r'n:\s*(\d+)\s+pts:.*?pts_time:\s*([\d.eE+-]+)',result.stderr)]
     files=sorted(folder.glob('*.jpg'))
     if not files:
@@ -116,27 +135,30 @@ class RepeatedCaret:
         return self.reversals>=2
 
 
-def build_overviews(folder, rows):
+def build_overviews(folder, rows, storage=None):
     """Navigation only: retain every candidate and its full-resolution source."""
     from PIL import Image, ImageDraw
     candidates = [row for row in rows if row['review_candidate']]
     target = Path(folder) / 'overviews'
-    target.mkdir(exist_ok=True)
+    if storage: target=storage.folder(Path(folder), 'overviews')
+    else: target.mkdir(exist_ok=True)
     groups = []
     for offset in range(0, len(candidates), 12):
         batch = candidates[offset:offset+12]
         sheet = Image.new('RGB', (960, 205*((len(batch)+3)//4)), 'white')
         draw = ImageDraw.Draw(sheet)
         for index, row in enumerate(batch):
-            with Image.open(safe_asset(folder, row['file'])) as original:
+            with storage.input(Path(folder)/row['file']) if storage else open(safe_asset(folder, row['file']), 'rb') as incoming, Image.open(incoming) as original:
                 thumbnail = original.convert('RGB')
                 thumbnail.thumbnail((240, 180))
             x, y = index%4*240, index//4*205
             sheet.paste(thumbnail, (x, y))
             draw.text((x+3, y+183), f"{row['id']}  {row['approx_seconds']:.3f}s", fill='black')
         path = target / f'{len(groups)+1:04d}.jpg'
-        sheet.save(path, quality=90)
-        groups.append(dict(file=path.relative_to(folder).as_posix(), sha256=file_hash(path),
+        if storage:
+            with storage.output(target, path.name) as stream: sheet.save(stream, format='JPEG', quality=90)
+        else: sheet.save(path, quality=90)
+        groups.append(dict(file=path.relative_to(folder).as_posix(), sha256=storage.checksum(path) if storage else file_hash(path),
                            frame_ids=[row['id'] for row in batch], purpose='navigation_only'))
     return groups
 
@@ -147,85 +169,97 @@ def scan(video, output, start, duration, sample_every, checksum, rebuild=False,p
     bounds(start,duration,sample_every)
     if duration>300 or duration/sample_every>1200:
         raise ValueError('Scan at most 300 seconds and 1200 sample intervals; use smaller lecture sections')
-    output=Path(output)
+    output=Path(output).absolute()
     settings,key=scan_settings(checksum,start,duration,sample_every)
-    output.mkdir(parents=True,exist_ok=True)
-    target=output/('scan-'+key[:24])
-    with file_lock(output/('.'+key+'.lock')):
-        if generation:
-            if not re.fullmatch('[a-f0-9]{12}', generation):
-                raise ValueError('Invalid screen generation')
-            target=target.with_name(target.name+'-'+generation)
-        elif rebuild:
-            target=target.with_name(target.name+'-'+uuid.uuid4().hex[:8])
-        elif preferred:
-            target=Path(preferred).resolve()
-            if not target.is_relative_to(output.resolve()):
-                raise ValueError('Screen scan path must stay within its storage')
-        if target.exists():
-            marker=json.loads((target/'completion.json').read_text())
-            if marker.get('key')!=key or marker.get('receipt_sha256')!=file_hash(target/'screen.json'):
-                raise ValueError('Screen scan metadata integrity changed; use a fresh output')
-            receipt=json.loads((target/'screen.json').read_text())
-            source_matches(receipt,checksum)
-            if receipt.get('settings')!=settings:
-                raise ValueError('Screen scan settings changed')
-            verify_scan(target,receipt)
-            return target
-        staging=output/('.pending-'+uuid.uuid4().hex)
-        staging.mkdir()
-        try:
-            if file_hash(video)!=checksum:
-                raise ValueError('Video changed before screen scan')
-            rows=extract_frames(video,staging/'frames',start,duration,sample_every,imageio_ffmpeg.get_ffmpeg_exe())
-            previous=None;last_selected=None;previous_rgb=None;last_anchor=-math.inf
-            caret=RepeatedCaret();previous_hash=None
-            for index,row in enumerate(rows,1):
-                row['id']=f'f{index:05d}'
-                row['file']='frames/'+row['file']
-                frame_checksum=file_hash(staging/row['file'])
-                if previous is not None and frame_checksum==previous_hash:
-                    rgb=previous_rgb;current=previous
-                    metrics=dict(changed_fraction=0.0,max_tile_mean=0.0)
-                    local=dict(strong_pixels=0,max_tile_pixels=0,bounds=None)
-                else:
-                    with Image.open(staging/row['file']) as image:
-                        rgb=image.convert('RGB')
-                        current=rgb.convert('L').resize((320,180))
-                    metrics=visual_difference(previous,current) if previous else None
-                    local=local_difference(previous_rgb,rgb) if previous_rgb is not None else None
-                previous_hash=frame_checksum
-                repeated_caret=caret.observe(previous_rgb,rgb,local) if previous_rgb is not None else False
-                accumulated=visual_difference(last_selected,current) if last_selected is not None else None
-                changed=bool(not repeated_caret and metrics and (metrics['changed_fraction']>=.0005 or metrics['max_tile_mean']>=4 or
-                    local['max_tile_pixels']>=4 or accumulated['max_tile_mean']>=4))
-                anchor=row['approx_seconds']-last_anchor>=10
-                row.update(sha256=frame_checksum,visual_change_metrics=metrics,
-                    review_candidate=previous is None or changed or anchor,
-                    candidate_reason='initial' if previous is None else ('pixel_change' if changed else ('periodic_anchor' if anchor else ('repeated_caret_like_change' if repeated_caret else 'not_selected'))),
-                    local_change_metrics=local, repeated_caret_like_change=repeated_caret,
-                    verification='not_inspected',screen_state_confirmed=False)
-                if changed and index > 1 and not rows[index-2].get('review_candidate'):
-                    rows[index-2].update(review_candidate=True,candidate_reason='before_pixel_change')
-                if anchor:last_anchor=row['approx_seconds']
-                if row['review_candidate']:last_selected=current
-                previous=current
-                previous_rgb=rgb
-            if file_hash(video)!=checksum:
-                raise ValueError('Video changed during screen scan')
-            receipt=dict(schema_version=1,source_sha256=checksum,settings=settings,
-                requested_interval=[start,start+duration],sample_count=len(rows),frames=rows,
-                overviews=build_overviews(staging, rows),
-                limitations=['Changes between samples may be missed.','Pixel changes do not identify code or validate meaning.',
-                    'Overview thumbnails are navigation only; read code from original frames.',
-                    'Repeated reversible thin-bar changes may be compacted as caret-like; all originals remain available.',
-                    'All samples need visual review.'])
-            atomic_json(staging/'screen.json',receipt)
-            atomic_json(staging/'completion.json',dict(key=key,receipt_sha256=file_hash(staging/'screen.json')))
-            staging.replace(target)
-            return target
-        finally:
-            if staging.exists():shutil.rmtree(staging)
+    from screen_storage import ScreenStorage
+    storage=ScreenStorage(output)
+    try:
+        target=output/('scan-'+key[:24])
+        with file_lock(output/('.'+key+'.lock'), directory_fd=storage.owner.fd):
+            if generation:
+                if not re.fullmatch('[a-f0-9]{12}', generation):
+                    raise ValueError('Invalid screen generation')
+                target=target.with_name(target.name+'-'+generation)
+            elif rebuild:
+                target=target.with_name(target.name+'-'+uuid.uuid4().hex[:8])
+            elif preferred:
+                target=Path(preferred).resolve()
+                if target==output.resolve() or not target.is_relative_to(output.resolve()):
+                    raise ValueError('Screen scan path must stay within its storage')
+            if target.exists() and not (target/'completion.json').exists():
+                preserve_temporary(target)
+                target=target.with_name(target.name+'-'+uuid.uuid4().hex[:8])
+            if target.exists():
+                storage.owner.guard.pin(target)
+                marker=json.loads((target/'completion.json').read_text())
+                if marker.get('key')!=key or marker.get('receipt_sha256')!=file_hash(target/'screen.json'):
+                    raise ValueError('Screen scan metadata integrity changed; use a fresh output')
+                receipt=json.loads((target/'screen.json').read_text())
+                source_matches(receipt,checksum)
+                if receipt.get('settings')!=settings:
+                    raise ValueError('Screen scan settings changed')
+                verify_scan(target,receipt)
+                storage.owner.guard.check()
+                return target
+            # Completion is the commit record: never rename a replaceable staging tree.
+            staging=target
+            storage.start(staging)
+            storage.folder(staging, 'frames')
+            published=False
+            try:
+                if file_hash(video)!=checksum:
+                    raise ValueError('Video changed before screen scan')
+                rows=extract_frames(video,staging/'frames',start,duration,sample_every,imageio_ffmpeg.get_ffmpeg_exe(),storage=storage)
+                previous=None;last_selected=None;previous_rgb=None;last_anchor=-math.inf
+                caret=RepeatedCaret();previous_hash=None
+                for index,row in enumerate(rows,1):
+                    row['id']=f'f{index:05d}'
+                    row['file']='frames/'+row['file']
+                    frame_checksum=storage.checksum(staging/row['file'])
+                    if previous is not None and frame_checksum==previous_hash:
+                        rgb=previous_rgb;current=previous
+                        metrics=dict(changed_fraction=0.0,max_tile_mean=0.0)
+                        local=dict(strong_pixels=0,max_tile_pixels=0,bounds=None)
+                    else:
+                        with storage.input(staging/row['file']) as incoming, Image.open(incoming) as image:
+                            rgb=image.convert('RGB')
+                            current=rgb.convert('L').resize((320,180))
+                        metrics=visual_difference(previous,current) if previous else None
+                        local=local_difference(previous_rgb,rgb) if previous_rgb is not None else None
+                    previous_hash=frame_checksum
+                    repeated_caret=caret.observe(previous_rgb,rgb,local) if previous_rgb is not None else False
+                    accumulated=visual_difference(last_selected,current) if last_selected is not None else None
+                    changed=bool(not repeated_caret and metrics and (metrics['changed_fraction']>=.0005 or metrics['max_tile_mean']>=4 or
+                        local['max_tile_pixels']>=4 or accumulated['max_tile_mean']>=4))
+                    anchor=row['approx_seconds']-last_anchor>=10
+                    row.update(sha256=frame_checksum,visual_change_metrics=metrics,
+                        review_candidate=previous is None or changed or anchor,
+                        candidate_reason='initial' if previous is None else ('pixel_change' if changed else ('periodic_anchor' if anchor else ('repeated_caret_like_change' if repeated_caret else 'not_selected'))),
+                        local_change_metrics=local, repeated_caret_like_change=repeated_caret,
+                        verification='not_inspected',screen_state_confirmed=False)
+                    if changed and index > 1 and not rows[index-2].get('review_candidate'):
+                        rows[index-2].update(review_candidate=True,candidate_reason='before_pixel_change')
+                    if anchor:last_anchor=row['approx_seconds']
+                    if row['review_candidate']:last_selected=current
+                    previous=current
+                    previous_rgb=rgb
+                if file_hash(video)!=checksum:
+                    raise ValueError('Video changed during screen scan')
+                receipt=dict(schema_version=1,source_sha256=checksum,settings=settings,
+                    requested_interval=[start,start+duration],sample_count=len(rows),frames=rows,
+                    overviews=build_overviews(staging, rows, storage=storage),
+                    limitations=['Changes between samples may be missed.','Pixel changes do not identify code or validate meaning.',
+                        'Overview thumbnails are navigation only; read code from original frames.',
+                        'Repeated reversible thin-bar changes may be compacted as caret-like; all originals remain available.',
+                        'All samples need visual review.'])
+                storage.metadata(staging, 'screen.json', receipt)
+                storage.commit(staging, key)
+                published=True
+                return target
+            finally:
+                if not published:preserve_temporary(staging)
+    finally:
+        storage.close()
 
 
 def verify_scan(folder,receipt,selected=None):

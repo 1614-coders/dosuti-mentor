@@ -61,7 +61,8 @@ class SourceAdapters(unittest.TestCase):
             second = self.acquire(url, sha256=course.file_hash(first), path=str(first))
         self.assertEqual(first, second)
         self.assertEqual(len(self.calls), 2)
-        self.assertEqual(list((self.lesson/'video').glob('.fetch-*')), [])
+        # Retain the transfer directory; a mutable pathname is not cleanup authority.
+        self.assertEqual(len(list((self.lesson/'video').glob('.fetch-*'))), 1)
 
     def test_direct_url_including_query_and_uppercase_suffix(self):
         url = 'https://files.example/lecture.MP4?token=test'
@@ -187,7 +188,8 @@ class SourceAdapters(unittest.TestCase):
         with patch.object(video_sources, 'curl', broken):
             with self.assertRaises(subprocess.CalledProcessError): self.acquire(url)
         self.assertFalse((self.lesson/'video/download.json').exists())
-        self.assertEqual(list((self.lesson/'video').glob('.fetch-*')), [])
+        # Retain the transfer directory; a mutable pathname is not cleanup authority.
+        self.assertEqual(len(list((self.lesson/'video').glob('.fetch-*'))), 1)
         with patch.object(video_sources, 'curl', self.fake_curl): self.acquire(url)
 
     def test_parallel_downloads_fetch_once(self):

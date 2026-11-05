@@ -3,6 +3,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 import errno
 import os
+import stat
 from pathlib import Path
 import time
 
@@ -16,10 +17,23 @@ def locked_stream(path):
 
 
 @contextmanager
-def file_lock(path, timeout=30, create_parent=True):
+def file_lock(path, timeout=30, create_parent=True, *, directory_fd=None):
     path = Path(path)
-    if create_parent: path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open('a+b') as stream:
+    if directory_fd is None:
+        if create_parent: path.parent.mkdir(parents=True, exist_ok=True)
+        stream = path.open('a+b')
+    else:
+        try:
+            fd = os.open(path.name, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                         0o600, dir_fd=directory_fd)
+        except FileExistsError:
+            fd = os.open(path.name, os.O_RDWR | os.O_NOFOLLOW, dir_fd=directory_fd)
+        stream = os.fdopen(fd, 'r+b')
+    with stream:
+        if directory_fd is not None:
+            info = os.fstat(stream.fileno())
+            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+                raise ValueError('Lock must be an ordinary, unlinked file')
         if os.name == 'nt':
             import msvcrt
             if path.stat().st_size == 0:

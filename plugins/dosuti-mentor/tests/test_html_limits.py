@@ -54,7 +54,7 @@ class HTMLLimits(unittest.TestCase):
         self.assertFalse(self.f.path.exists())
         self.assertFalse((self.f.f.path/'study-sources').exists())
 
-    def test_extraction_output_limit_rolls_back_only_its_new_import(self):
+    def test_extraction_output_limit_preserves_existing_files_and_registry(self):
         import html_content
         import material_sources as ms
         _,path=self.extracted(1)
@@ -63,7 +63,8 @@ class HTMLLimits(unittest.TestCase):
             with self.assertRaisesRegex(ValueError,'output'):
                 ms.attach_material(self.f.args(kind='homework',source=str(path)))
         after={str(p):p.read_bytes() for p in self.f.f.path.rglob('*') if p.is_file() and p.suffix!='.lock'}
-        self.assertEqual(after,{k:v for k,v in before.items() if not k.endswith('.lock')})
+        self.assertTrue(all(after[k]==v for k,v in before.items() if not k.endswith('.lock')))
+        self.assertEqual(json.loads((self.f.f.lesson/'lesson.json').read_text())['homework']['status'],'not_asked')
         self.assertTrue(path.exists())
 
 if __name__=='__main__':unittest.main()

@@ -49,6 +49,12 @@ class Materials(unittest.TestCase):
         return self.resource('extract',item['id'])['items'][0]
     def review(self,item,revision=None):return ms.resource(self.args(action='review',resource_id=item['id'],expected_revision=revision or item['revision'],notes='Read and checked task text'))
     def test_remote_zip_keeps_origin_and_inventory(self):
+        from safe_zip_import import supported
+        if not supported():
+            with self.assertRaisesRegex(ValueError, 'Safe ZIP import is unavailable'):
+                self.attach('code',self.url+'/zip')
+            self.assertEqual(course.read(self.f.lesson/'lesson.json')['code']['status'],'not_asked')
+            return
         code=self.attach('code',self.url+'/zip');self.assertIn('src/main.py',code['inventory']);self.assertEqual(code['origin']['source'],self.url+'/zip');self.assertTrue(Path(code['origin']['raw_file']).exists())
     def test_remote_homework_html_extracts_text(self):
         hw=self.attach('homework',self.url+'/redirect');text=Path(hw['file']).read_text();self.assertIn('Print <hello>',text);self.assertNotIn('do not include',text);self.assertIn('    print(x)',text);self.assertTrue(hw['origin']['effective_url'].endswith('/article'))
@@ -171,10 +177,12 @@ class Materials(unittest.TestCase):
         with zipfile.ZipFile(p,'w') as z:z.writestr('C:\\outside.py','bad')
         with self.assertRaises(ValueError):self.attach('code',p)
     def test_concurrent_replacement_rejected(self):
-        original=course.update_lesson
-        def replace(directory,callback):
-            original(directory,lambda d:d.update(resources={'status':'absent','items':[]}));original(directory,callback)
+        import safe_zip_import
+        original=safe_zip_import.publish
+        def replace(args,directory,fd,guard,material,**kw):
+            course.update_lesson(directory,lambda d:d.update(resources={'status':'absent','items':[]}))
+            return original(args,directory,fd,guard,material,**kw)
         item=self.attach('resources',self.url+'/article')['items'][0]
-        with patch.object(course,'update_lesson',side_effect=replace):
+        with patch.object(safe_zip_import,'publish',side_effect=replace):
             with self.assertRaises(ValueError):self.resource('extract',item['id'])
         self.assertEqual(self.resource()['items'],[])

@@ -42,8 +42,12 @@ class PacketPublication(unittest.TestCase):
         with patch.object(integrity,'identity',identity), patch.object(guard,'capture',return_value=None), \
                 patch.object(tutor_packet,'build_packet',late_change):
             with self.assertRaises(integrity.SourceDrift):jobs.run_job(self.args,self.ffmpeg)
-        for name in ('progress.json','visual_notes.json','manifest.json','tutor_packet.json','checkpoint.json'):
+        for name in ('progress.json','visual_notes.json'):
             self.assertFalse((self.out/name).exists(),name)
+        checkpoint=json.loads((self.out/'checkpoint.json').read_text())
+        self.assertEqual(checkpoint['stages'],{});self.assertEqual(checkpoint['status'],'unverified')
+        from publication import publish_job
+        with self.assertRaises(ValueError):publish_job(self.out,self.root/'published','unverified-job')
 
     def test_successful_packet_still_initializes_legacy_user_files(self):
         jobs.run_job(self.args,self.ffmpeg)
@@ -99,17 +103,21 @@ class CleanSourceRetry(unittest.TestCase):
         count=len(self.calls)+1
         self.calls.append(dict(lock=(out/'.processing.lock').stat().st_ino,checkpoint=(out/'checkpoint.json').exists()))
         if count==2:
-            self.assertFalse((out/'checkpoint.json').exists())
-            self.assertFalse((out/'audio.wav').exists())
+            from worker_io import current
+            self.assertTrue(current(out).force_fresh, 'Retry must explicitly ignore the retained failed cache')
+            current(out).force_fresh=False
+            self.assertEqual((out/'audio.wav').read_bytes(),b'attempt-1')
             with self.assertRaises(TimeoutError):
                 with file_lock(out/'.processing.lock',timeout=0):pass
         if count in self.before_read:self.before_read[count]()
         checksum=integrity.file_hash(args.video)
-        (out/'audio.wav').write_bytes(('attempt-'+str(count)).encode())
-        (out/'tutor_packet.json').write_text('{}')
-        (out/'manifest.json').write_text('{}')
+        from worker_io import current
+        io=current(out)
+        io.write_slot('audio.wav',[('attempt-'+str(count)).encode()])
+        jobs.atomic_json(out/'tutor_packet.json',{})
+        jobs.atomic_json(out/'manifest.json',{})
         state=dict(source_sha256=checksum,stages={'packet':{'sha256':integrity.file_hash(out/'tutor_packet.json')}})
-        atomic_json(out/'checkpoint.json',state)
+        jobs.atomic_json(out/'checkpoint.json',state)
         if count in self.actions:self.actions[count]()
         integrity.file_hash(args.video)
         return state
@@ -119,8 +127,12 @@ class CleanSourceRetry(unittest.TestCase):
     def rejected(self,expected_calls=1):
         with self.assertRaises((ValueError,OSError)):self.run_job()
         self.assertEqual(len(self.calls),expected_calls)
-        for name in ('manifest.json','tutor_packet.json','audio.wav','checkpoint.json'):
-            self.assertFalse((self.out/name).exists(),name+' must not remain publishable')
+        checkpoint=json.loads((self.out/'checkpoint.json').read_text())
+        self.assertEqual(checkpoint['stages'],{})
+        self.assertEqual(checkpoint['status'],'unverified')
+        self.assertFalse((self.out/'publication.json').exists())
+        from publication import publish_job
+        with self.assertRaises(ValueError):publish_job(self.out,self.root/'published','retry-rejected')
         self.assertEqual(json.loads((self.out/'processing-status.json').read_text())['status'],'failed')
 
     def test_tracking_restarts_once_with_empty_state_and_same_lock(self):

@@ -19,7 +19,7 @@
 В 0.4.51 полный набор на Mac: 993 теста. В 0.4.52 после правок инструкций повторно
 проверены 45 тестов целей/настроек/продолжения, 11 skills и 8 сценариев установленного
 CLI. Это не нативная Windows-приёмка и не доказательство качества диалога.
-Подробности: [TEST_REPORT.md](TEST_REPORT.md).
+Исторические отчёты: [qa-reports](qa-reports/).
 
 ```sh
 python3 -m unittest discover -s plugins/dosuti-mentor/tests
@@ -34,7 +34,8 @@ python3 -m unittest discover -s plugins/dosuti-mentor/tests
 блокировками; `--apply` удаляет только проверенные остатки. Подробности:
 [диагностика и очистка](plugins/dosuti-mentor/references/storage-report.md).
 
-Подключение локального источника сверено с
+Официальная установка использует только публичный main; локальные копии разработки
+не являются каналом обновлений для пользователей. Подключение marketplace сверено с
 [официальной документацией OpenAI](https://developers.openai.com/plugins/build/plugins)
 и справкой локального CLI. Лицензия: [MIT](LICENSE).
 
