@@ -21,6 +21,21 @@ import safe_zip_import
 
 
 class RegistryContract(unittest.TestCase):
+    def child_environment(self):
+        # Parent sys.path edits are not inherited by a fresh python -c process.
+        environment = os.environ.copy()
+        scripts = str(Path(__file__).resolve().parents[1] / 'scripts')
+        inherited = environment.get('PYTHONPATH')
+        environment['PYTHONPATH'] = scripts + (os.pathsep + inherited if inherited else '')
+        return environment
+
+    def assert_child_running(self, process, message):
+        if process.poll() is not None:
+            output, error = process.communicate(timeout=5)
+            self.fail(f'{message}; pid={process.pid}, exit={process.returncode}\n'
+                      f'stdout:\n{output.decode("utf-8", errors="replace")}\n'
+                      f'stderr:\n{error.decode("utf-8", errors="replace")}')
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
@@ -140,17 +155,18 @@ course.update_lesson(p,lambda d:d['rows'].append('child'))
         try:
             with file_lock(self.directory / '.lesson.lock'):
                 process = subprocess.Popen([sys.executable, '-B', '-c', script, str(self.directory)],
-                                           stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                                           stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                           env=self.child_environment(), cwd=self.directory.parent)
                 deadline = time.monotonic() + 10
                 while not (self.directory.parent / 'ready-lock').exists():
-                    self.assertIsNone(process.poll(), 'Child exited before contention')
+                    self.assert_child_running(process, 'Child exited before contention')
                     self.assertLess(time.monotonic(), deadline)
                     time.sleep(.01)
                 time.sleep(.05)
-                self.assertIsNone(process.poll(), 'Writer bypassed the existing lock helper')
+                self.assert_child_running(process, 'Writer bypassed the existing lock helper')
                 self.assertEqual(self.path.read_bytes(), self.old)
             _, error = process.communicate(timeout=10)
-            self.assertEqual(process.returncode, 0, error.decode())
+            self.assertEqual(process.returncode, 0, error.decode('utf-8', errors='replace'))
             self.assertEqual(course.read(self.path)['rows'], ['child'])
         finally:
             if process is not None:
@@ -203,21 +219,26 @@ for i in range(5):
         try:
             for number in range(4):
                 processes.append(subprocess.Popen([sys.executable, '-B', '-c', worker,
-                    str(self.directory), str(number)], stdout=subprocess.PIPE, stderr=subprocess.PIPE))
+                    str(self.directory), str(number)], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    env=self.child_environment(), cwd=self.directory.parent))
+            self.assertEqual(len({p.pid for p in processes}), 4, 'Four independent Python processes required')
+            self.assertNotIn(os.getpid(), {p.pid for p in processes})
             deadline = time.monotonic() + 20
             while not all((self.directory.parent / ('ready' + str(i))).exists() for i in range(4)):
+                for p in processes: self.assert_child_running(p, 'Early child exit before start barrier')
                 self.assertLess(time.monotonic(), deadline, 'All writers must reach start barrier')
-                self.assertTrue(all(p.poll() is None for p in processes), 'Early child exit')
                 time.sleep(.01)
             (self.directory.parent / 'go').write_bytes(b'1')
             while any(p.poll() is None for p in processes):
+                for p in processes:
+                    if p.poll() not in (None, 0): self.assert_child_running(p, 'Writer failed after start barrier')
                 self.assertLess(time.monotonic(), deadline, 'Writer deadline')
                 value = json.loads(self.atomic_read())
                 self.assertEqual(value['revision'], len(value['rows']))
                 time.sleep(.001)
             for p in processes:
                 _, error = p.communicate(timeout=2)
-                self.assertEqual(p.returncode, 0, error.decode())
+                self.assertEqual(p.returncode, 0, error.decode('utf-8', errors='replace'))
             value = course.read(self.path)
             self.assertEqual(value['revision'], 20)
             self.assertEqual(len(set(value['rows'])), 20)
