@@ -1,0 +1,78 @@
+name: Windows native open-target probe
+
+on:
+  push:
+    branches: [codex/windows-native-open-target]
+
+permissions:
+  contents: read
+
+env:
+  PYTHONDONTWRITEBYTECODE: '1'
+  PYTHONUTF8: '1'
+  PYTHONIOENCODING: utf-8
+
+jobs:
+  probe:
+    name: Windows x64 NTFS / ${{ matrix.shell }}
+    runs-on: windows-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        shell: [pwsh, powershell]
+    defaults:
+      run:
+        shell: ${{ matrix.shell }}
+    steps:
+      - uses: actions/checkout@9f698171ed81b15d1823a05fc7211befd50c8ae0
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Prepare evidence
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path probe-output -Force | Out-Null
+          git rev-parse HEAD 'HEAD^{tree}' 'HEAD^' | Set-Content -Encoding utf8 probe-output/git-provenance.txt
+      - uses: actions/setup-python@e797f83bcb11b83ae66e0230d6156d7c80228e7c
+        with:
+          python-version: '3.12'
+          architecture: x64
+      - name: Verify native environment and exact publication scope
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSVersionTable | Out-String | Tee-Object -FilePath probe-output/powershell.txt
+          if ('${{ matrix.shell }}' -eq 'pwsh' -and $PSVersionTable.PSVersion.Major -ne 7) { throw 'PowerShell 7 required' }
+          if ('${{ matrix.shell }}' -eq 'powershell' -and ($PSVersionTable.PSVersion.Major -ne 5 -or $PSVersionTable.PSVersion.Minor -ne 1)) { throw 'Windows PowerShell 5.1 required' }
+          $tempRoot = [System.IO.Path]::GetPathRoot([System.IO.Path]::GetTempPath())
+          $format = ([System.IO.DriveInfo]::new($tempRoot)).DriveFormat
+          "tempRoot=$tempRoot filesystem=$format runnerArch=$env:RUNNER_ARCH" | Tee-Object -FilePath probe-output/filesystem.txt
+          if ($format -ne 'NTFS' -or $env:RUNNER_ARCH -ne 'X64') { throw 'Windows x64 / NTFS required' }
+          python -X utf8 -B -c "import sys,struct,subprocess,json; from pathlib import Path; assert sys.platform=='win32' and sys.version_info[:2]==(3,12) and struct.calcsize('P')==8; assert subprocess.check_output(['git','rev-parse','HEAD^'],text=True).strip()=='7c2db8cf596f5fc7ac2396de3af3420ff59b998a'; expected=['.github/workflows/windows-native-open-target.yml','plugins/dosuti-mentor/tests/probe_windows_open_target.py']; assert subprocess.check_output(['git','diff','--name-only','HEAD^','HEAD'],text=True).splitlines()==expected; assert subprocess.check_output(['git','diff','--diff-filter=A','--name-only','HEAD^','HEAD'],text=True).splitlines()==expected; assert json.loads(Path('plugins/dosuti-mentor/plugin.json').read_text())['version']=='0.8.6'; print(sys.version)"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Run three isolated native cases once
+        run: |
+          $ErrorActionPreference = 'Stop'
+          cmd /d /c "python -X utf8 -B plugins/dosuti-mentor/tests/probe_windows_open_target.py > probe-output/results.jsonl 2> probe-output/stderr.log"
+          $code = $LASTEXITCODE
+          $code | Set-Content -Encoding ascii probe-output/exit-code.txt
+          Copy-Item probe-output/results.jsonl probe-output/stdout.log
+          Get-Content -Encoding UTF8 probe-output/results.jsonl
+          Get-Content -Encoding UTF8 probe-output/stderr.log
+          exit $code
+      - name: Print evidence even after failure
+        if: ${{ always() }}
+        shell: pwsh
+        run: |
+          Get-ChildItem probe-output -File -ErrorAction SilentlyContinue | ForEach-Object {
+            Write-Output "=== $($_.Name) ==="
+            Get-Content -Encoding UTF8 -LiteralPath $_.FullName
+          }
+      - name: Upload evidence even after failure
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: windows-open-target-${{ matrix.shell }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: probe-output/
+          if-no-files-found: error
+          retention-days: 7
