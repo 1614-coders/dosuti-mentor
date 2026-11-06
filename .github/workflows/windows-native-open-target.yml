@@ -27,7 +27,7 @@ jobs:
     steps:
       - uses: actions/checkout@9f698171ed81b15d1823a05fc7211befd50c8ae0
         with:
-          fetch-depth: 2
+          fetch-depth: 0
           persist-credentials: false
       - name: Prepare evidence
         shell: pwsh
@@ -48,7 +48,7 @@ jobs:
           $format = ([System.IO.DriveInfo]::new($tempRoot)).DriveFormat
           "tempRoot=$tempRoot filesystem=$format runnerArch=$env:RUNNER_ARCH" | Tee-Object -FilePath probe-output/filesystem.txt
           if ($format -ne 'NTFS' -or $env:RUNNER_ARCH -ne 'X64') { throw 'Windows x64 / NTFS required' }
-          python -X utf8 -B -c "import sys,struct,subprocess,json; from pathlib import Path; assert sys.platform=='win32' and sys.version_info[:2]==(3,12) and struct.calcsize('P')==8; assert subprocess.check_output(['git','rev-parse','HEAD^'],text=True).strip()=='7c2db8cf596f5fc7ac2396de3af3420ff59b998a'; expected=['.github/workflows/windows-native-open-target.yml','plugins/dosuti-mentor/tests/probe_windows_open_target.py']; assert subprocess.check_output(['git','diff','--name-only','HEAD^','HEAD'],text=True).splitlines()==expected; assert subprocess.check_output(['git','diff','--diff-filter=A','--name-only','HEAD^','HEAD'],text=True).splitlines()==expected; assert json.loads(Path('plugins/dosuti-mentor/plugin.json').read_text())['version']=='0.8.6'; print(sys.version)"
+          python -X utf8 -B -c "import sys,struct,subprocess,json; from pathlib import Path; assert sys.platform=='win32' and sys.version_info[:2]==(3,12) and struct.calcsize('P')==8; base='7c2db8cf596f5fc7ac2396de3af3420ff59b998a'; subprocess.run(['git','cat-file','-e',base+'^{commit}'],check=True); subprocess.run(['git','merge-base','--is-ancestor',base,'HEAD'],check=True); expected=['.github/workflows/windows-native-open-target.yml','plugins/dosuti-mentor/tests/probe_windows_open_target.py','plugins/dosuti-mentor/tests/test_windows_open_target_probe.py']; actual=subprocess.check_output(['git','diff','--no-renames','--name-status','-z',base,'HEAD']); required=b''.join(b'A\0'+path.encode('utf-8')+b'\0' for path in expected); assert actual==required,(actual,required); assert json.loads(Path('plugins/dosuti-mentor/plugin.json').read_text())['version']=='0.8.6'; print(sys.version)"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Run three isolated native cases once
         run: |
