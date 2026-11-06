@@ -84,11 +84,11 @@ def replace_relative(api, handle, parent):
     name = 'lesson.json'.encode('utf-16-le')
     buffer = c.create_string_buffer(c.sizeof(native.FILE_RENAME_INFO) + len(name))
     header = native.FILE_RENAME_INFO.from_buffer(buffer)
-    header.Flags, header.RootDirectory, header.FileNameLength = 1, parent, len(name)
+    header.Flags, header.RootDirectory, header.FileNameLength = 3, parent, len(name)  # REPLACE_IF_EXISTS | POSIX_SEMANTICS
     c.memmove(c.addressof(buffer) + native.FILE_RENAME_INFO.FileName.offset, name, len(name))
     ios = native.IO_STATUS_BLOCK()
     ios.Result.Status = 0x103
-    result = api.rename_info(handle, c.byref(ios), buffer, len(buffer), 10)
+    result = api.rename_info(handle, c.byref(ios), buffer, len(buffer), 65)
     if result & 0xffffffff == 0x103:
         deferred = None
         while True:
@@ -104,7 +104,7 @@ def replace_relative(api, handle, parent):
             except BaseException as error:
                 if deferred is None: deferred = error
         if deferred is not None: raise deferred
-    api.status(result, 'Registry FileRenameInformation')
+    api.status(result, 'Registry FileRenameInformationEx')
 
 
 def identity(value):

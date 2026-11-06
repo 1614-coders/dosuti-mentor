@@ -45,6 +45,53 @@ class RegistryContract(unittest.TestCase):
         self.path.write_text(json.dumps(dict(id='lesson-01', revision=0, rows=[], video={'source': 'https://example.test/video'}, code={}, homework={}, resources={'items': []})))
         self.old = self.path.read_bytes()
 
+    @unittest.skipUnless(os.name == 'nt', 'Requires native Windows x64/NTFS HANDLE semantics')
+    def test_replace_retains_old_reader_and_new_open_sees_committed_bytes(self):
+        import registry_windows as win
+        import windows_managed_home as n
+        foreign = self.directory / 'progress.json'
+        foreign.write_bytes(b'preserve unrelated progress')
+        with win.WindowsRegistry(self.directory) as reader_store:
+            api, parent = reader_store.api, reader_store.parent
+            raw = 'lesson.json'.encode('utf-16-le')
+            name = c.create_string_buffer(raw + b'\0\0')
+            text = n.UNICODE_STRING(len(raw), len(raw) + 2, c.cast(name, n.HANDLE))
+            oa = n.OBJECT_ATTRIBUTES(c.sizeof(n.OBJECT_ATTRIBUTES), parent,
+                                     c.pointer(text), 0x1040, None, None)
+            ios, reader = n.IO_STATUS_BLOCK(), n.HANDLE()
+            result = api.create(c.byref(reader), 0x80000000 | n.SYNC, c.byref(oa),
+                                c.byref(ios), None, 0x80, 7, 1,
+                                0x200000 | 0x20 | 0x40, None, 0)
+            api.status(result, 'Registry retained reader NtCreateFile')
+            try:
+                api.status(ios.Result.Status, 'Registry retained reader IOSB')
+                self.assertEqual(ios.Information, 1)
+                old_identity = reader_store.session.inspect(reader.value, False)[0]
+                def read_old():
+                    # A replaced HANDLE can be DeletePending; read it directly.
+                    api.boolean(api.seek(reader.value, 0, None, 0))
+                    value, count = c.create_string_buffer(len(self.old) + 1), n.U32()
+                    api.boolean(api.read_file(reader.value, value, len(value), c.byref(count), None))
+                    return value.raw[:count.value]
+                self.assertEqual(read_old(), self.old)  # Reader is open before writer starts.
+                with patch.object(win, 'replace_relative', wraps=win.replace_relative) as rename:
+                    receipt = course.update_lesson(self.directory,
+                        lambda d: d['rows'].append('replacement'), expected_revision=0)
+                self.assertEqual(rename.call_count, 1, 'Exactly one rename; no retry/fallback')
+                self.assertEqual(read_old(), self.old)
+                old_id = n.FILE_ID_INFO()
+                api.boolean(api.info(reader.value, 18, c.byref(old_id), c.sizeof(old_id)))
+                self.assertEqual((old_id.VolumeSerialNumber, bytes(old_id.FileId)), old_identity)
+                new_bytes, new_identity = reader_store.read()
+                self.assertNotEqual(new_identity, win.identity(old_identity))
+                self.assertEqual(new_identity, receipt.identity)
+                self.assertEqual(json.loads(new_bytes)['rows'], ['replacement'])
+                self.assertEqual(json.loads(new_bytes)['revision'], 1)
+                self.assertEqual(registry.recover(self.directory, receipt), 'committed')
+                self.assertEqual(foreign.read_bytes(), b'preserve unrelated progress')
+            finally:
+                api.close(reader)
+
     def test_both_writers_share_revision_and_serialization(self):
         first = course.update_lesson(self.directory, lambda d: d['rows'].append('course'), expected_revision=0)
         second = safe_zip_import.publish(None, self.directory, None, None, None,
@@ -269,13 +316,15 @@ class WindowsRegistryModels(unittest.TestCase):
         import registry_windows as win
         import windows_managed_home as n
         for pending, status in ((False, 0), (True, 0), (False, 0xC0000035),
-                                (False, 0xC0000022), (True, 0xC0000043)):
+                                (False, 0xC0000022), (True, 0xC0000043),
+                                (False, 0xC0000003), (False, 0xC00000BB)):
             with self.subTest(pending=pending, status=status):
                 api = object.__new__(n.Native)
                 api.to_dos = lambda value: 5
                 captured = {}
                 def call(handle, ios, buffer, length, kind):
-                    captured.update(handle=handle, ios=ios, raw=buffer.raw, length=length, kind=kind)
+                    captured.update(handle=handle, ios=ios, raw=buffer.raw, length=length, kind=kind,
+                                    submissions=captured.get('submissions', 0) + 1)
                     return 0x103 if pending else n.I32(status).value
                 def wait(*args):
                     captured['waited'] = args
@@ -287,11 +336,12 @@ class WindowsRegistryModels(unittest.TestCase):
                     self.assertEqual(error.exception.status, status)
                 else: win.replace_relative(api, 123, 456)
                 header = n.FILE_RENAME_INFO.from_buffer_copy(captured['raw'])
-                self.assertEqual((captured['handle'], captured['kind']), (123, 10))
+                self.assertEqual((captured['handle'], captured['kind']), (123, 65))
                 self.assertEqual(captured['length'], c.sizeof(n.FILE_RENAME_INFO) + len('lesson.json'.encode('utf-16-le')))
-                self.assertEqual((header.Flags, header.RootDirectory, header.FileNameLength), (1, 456, 22))
+                self.assertEqual((header.Flags, header.RootDirectory, header.FileNameLength), (3, 456, 22))
                 self.assertEqual(captured['raw'][20:42], 'lesson.json'.encode('utf-16-le'))
                 self.assertEqual('waited' in captured, pending)
+                self.assertEqual(captured['submissions'], 1, 'No retry or class-10 fallback')
 
     def test_lock_open_is_relative_and_shares_read_write_not_delete(self):
         import registry_windows as win
