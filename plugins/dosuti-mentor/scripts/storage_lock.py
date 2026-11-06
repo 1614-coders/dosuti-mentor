@@ -36,9 +36,8 @@ def file_lock(path, timeout=30, create_parent=True, *, directory_fd=None):
                 raise ValueError('Lock must be an ordinary, unlinked file')
         if os.name == 'nt':
             import msvcrt
-            if path.stat().st_size == 0:
-                stream.write(b'0')
-                stream.flush()
+            # CRT byte-range locks may extend beyond EOF. Never write the lock
+            # byte before acquiring it, or race another holder's exclusive lock.
 
             def acquire():
                 stream.seek(0)

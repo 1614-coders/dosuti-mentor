@@ -57,14 +57,10 @@ def save(path, value):
         stream.write(json.dumps(value, ensure_ascii=False, indent=2))
 
 
-def update_lesson(directory, change):
+def update_lesson(directory, change, *, expected_revision=None):
     """Apply a small mutation to fresh state, never a stale processing snapshot."""
-    with file_lock(directory / '.lesson.lock'):
-        data = read(directory / 'lesson.json')
-        change(data)
-        data['revision'] = data.get('revision', 0) + 1
-        data['updated'] = now()
-        save(directory / 'lesson.json', data)
+    from registry_update import update
+    return update(directory, change, expected_revision=expected_revision)
 
 
 def material_history(current):

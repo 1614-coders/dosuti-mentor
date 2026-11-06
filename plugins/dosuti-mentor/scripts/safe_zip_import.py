@@ -85,25 +85,20 @@ def read_lesson(fd, path):
     return course.resolved(data, path)
 
 
-def publish(args, directory, fd, guard, material, *, item=None, change=None):
+def publish(args, directory, fd, guard, material, *, item=None, change=None, expected_revision=None):
     """Use the same lesson lock, merge and serialization contract, with anchored I/O."""
     import course
-    path = directory / 'lesson.json'
-    guard.check()
-    with file_lock(directory / '.lesson.lock', directory_fd=fd):
-        data = read_lesson(fd, path)
+    from registry_update import update, pinned_posix
+    def mutate(data):
+        if (not isinstance(data.get('id'), str)
+                or data['id'].casefold() != directory.name.casefold()):
+            raise ValueError('Lesson registry identity changed')
         if change is None: course.publish_attachment(data, args, material, item)
         else: change(data)
-        data['revision'] = data.get('revision', 0) + 1
-        data['updated'] = course.now()
-        text = json.dumps(course.anchored(data, path), ensure_ascii=False, indent=2)
-        temporary = 'lesson.json.' + uuid.uuid4().hex + '.tmp'
-        with os.fdopen(new_file(fd, temporary), 'w', encoding='utf-8') as stream:
-            stream.write(text)
-            stream.flush()
-            os.fsync(stream.fileno())
-        guard.check()
-        os.rename(temporary, 'lesson.json', src_dir_fd=fd, dst_dir_fd=fd)
+    if fd is None and guard is None:
+        return update(directory, mutate, expected_revision=expected_revision)
+    registry = pinned_posix(directory, fd, guard)
+    return update(directory, mutate, expected_revision=expected_revision, registry=registry)
 
 
 def attach_zip(args, directory, source):
