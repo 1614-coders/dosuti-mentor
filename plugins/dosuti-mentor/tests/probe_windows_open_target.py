@@ -22,7 +22,7 @@ from registry_windows import owned_io
 
 OLD, NEW, FOREIGN = b'{"value":"old"}', b'{"value":"new"}', b'UNRELATED MUST STAY IDENTICAL'
 PENDING, UNTOUCHED = 0x103, 0xDEADBEEF
-READER_ACCESS = 0x80000000  # GENERIC_READ, matching the mixed-writer atomic reader.
+READER_ACCESS = 0x80000000 | n.SYNC  # Explicit SYNCHRONIZE for synchronous native I/O.
 CASES = ((10, 1, False), (10, 1, True), (65, 3, True))
 UNSUPPORTED = {0xC0000002, 0xC0000003, 0xC00000BB}
 
@@ -87,8 +87,14 @@ def open_reader(api, parent, name):
     text = n.UNICODE_STRING(len(raw), len(raw) + 2, c.cast(value, n.HANDLE))
     oa = n.OBJECT_ATTRIBUTES(c.sizeof(n.OBJECT_ATTRIBUTES), parent, c.pointer(text), 0x1040, None, None)
     ios, handle = n.IO_STATUS_BLOCK(), n.HANDLE()
+    ios.Result.Status = n.I32(UNTOUCHED).value
     result = api.create(c.byref(handle), READER_ACCESS, c.byref(oa), c.byref(ios), None,
                         0x80, 7, 1, 0x200000 | 0x20 | 0x40, None, 0)
+    emit(dict(phase='reader_open_return', call=dict(
+        name=name, root_handle=parent, desired_access=READER_ACCESS, share_access=7,
+        create_options=0x200000 | 0x20 | 0x40, ntstatus=result & 0xffffffff,
+        ntstatus_hex=f'0x{result & 0xffffffff:08X}', iosb_status=ios.Result.Status & 0xffffffff,
+        iosb_information=ios.Information, handle=handle.value)))
     api.status(result, 'Probe reader NtCreateFile')
     try:
         api.status(ios.Result.Status, 'Probe reader IOSB')
