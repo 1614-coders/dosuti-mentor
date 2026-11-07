@@ -1,4 +1,4 @@
-import contextlib,hashlib,io,json,os,shutil,sys,threading,zipfile
+import contextlib,errno,hashlib,io,json,os,shutil,sys,threading,zipfile
 from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
 from pathlib import Path
 from types import SimpleNamespace as NS
@@ -109,7 +109,8 @@ class Materials(unittest.TestCase):
             # A sealed Windows snapshot must prevent writes; no ACL repair/bypass.
             before=raw.read_bytes()
             with self.assertRaises(PermissionError) as blocked:raw.write_text('changed')
-            self.assertEqual(blocked.exception.winerror,5)
+            self.assertEqual(blocked.exception.errno,errno.EACCES)
+            self.assertIn(getattr(blocked.exception,'winerror',None),(None,5))
             self.assertEqual(raw.read_bytes(),before)
             self.assertEqual(course.file_hash(raw),item['origin']['sha256'])
             self.assertEqual(self.resource()['items'][0]['source_integrity'],'verified')

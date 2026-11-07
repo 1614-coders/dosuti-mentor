@@ -1,4 +1,5 @@
 import contextlib
+import errno
 import io
 import json
 import os
@@ -70,7 +71,8 @@ class CodeStages(unittest.TestCase):
             # Windows proves prevention, not detection of a successful tamper.
             before=p.read_bytes();checksum=course.file_hash(p)
             with self.assertRaises(PermissionError) as blocked:p.write_text('bad')
-            self.assertEqual(blocked.exception.winerror,5)
+            self.assertEqual(blocked.exception.errno,errno.EACCES)
+            self.assertIn(getattr(blocked.exception,'winerror',None),(None,5))
             self.assertEqual(p.read_bytes(),before);self.assertEqual(course.file_hash(p),checksum)
             self.assertEqual(registry.read_bytes(),registered)
             historical=self.data()['code']['history'][-1]
