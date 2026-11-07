@@ -26,7 +26,9 @@ class StartChoices(unittest.TestCase):
         key = 'project-' + hashlib.sha256(os.path.normcase(str(project)).encode('utf-8')).hexdigest()[:32]
         connection.dispatch(NS(project=self.home, action='connect', scope='chat', chat=key,
             expected_revision=0, course=self.a.course, profile='default'))
-        with patch.dict(os.environ, {}, clear=True):
+        with patch.dict(os.environ):
+            os.environ.pop('CODEX_THREAD_ID', None)  # Preserve HOME/USERPROFILE and other runtime variables.
+            self.assertNotIn('CODEX_THREAD_ID', os.environ)
             state = learning_start.start(project, None, self.home)
         self.assertEqual(state['start_action'], 'choose_course')
         self.assertTrue(state['needs_chat_id'])
@@ -178,7 +180,9 @@ class StartChoices(unittest.TestCase):
 
     def test_missing_chat_id_is_not_replaced_with_fake_id(self):
         self.complete()
-        with patch.dict(os.environ, {}, clear=True):
+        with patch.dict(os.environ):
+            os.environ.pop('CODEX_THREAD_ID', None)
+            self.assertNotIn('CODEX_THREAD_ID', os.environ)
             r = learning_start.start(None, None, self.home)
             self.assertTrue(r['needs_chat_id'])
             with self.assertRaisesRegex(ValueError, 'chat ID'):

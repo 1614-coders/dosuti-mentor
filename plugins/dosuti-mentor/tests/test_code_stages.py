@@ -1,6 +1,8 @@
 import contextlib
+import errno
 import io
 import json
+import os
 from pathlib import Path
 import shutil
 import sys
@@ -59,8 +61,33 @@ class CodeStages(unittest.TestCase):
         self.save();(self.folder/'frames/0.jpg').write_bytes(b'tamper')
         self.assertTrue(stages.checked(self.f.lesson,self.data())[0]['stale'])
     def test_historical_code_tampering_invalidates_stage(self):
-        self.save();p=Path(self.data()['code']['snapshot'])/'example.py';self.attach('x=2');p.chmod(0o600);p.write_text('bad')
-        self.assertTrue(self.f.context(0,30)['code_stages'][0]['stale'])
+        self.save();p=Path(self.data()['code']['snapshot'])/'example.py';self.attach('x=2')
+        with contextlib.redirect_stdout(io.StringIO()):
+            course.progress(self.args(topic='Independent practice',stage='practice_checked',details='Preserve progress'))
+        progress=self.f.path/'learners/default/progress.sqlite3';progress_before=progress.read_bytes()
+        registry=self.f.lesson/'lesson.json';registered=registry.read_bytes()
+        foreign=self.f.directory/'foreign.txt';foreign.write_bytes(b'FOREIGN DATA')
+        if os.name == 'nt':
+            # Windows proves prevention, not detection of a successful tamper.
+            before=p.read_bytes();checksum=course.file_hash(p)
+            with self.assertRaises(PermissionError) as blocked:p.write_text('bad')
+            self.assertEqual(blocked.exception.errno,errno.EACCES)
+            self.assertIn(getattr(blocked.exception,'winerror',None),(None,5))
+            self.assertEqual(p.read_bytes(),before);self.assertEqual(course.file_hash(p),checksum)
+            self.assertEqual(registry.read_bytes(),registered)
+            historical=self.data()['code']['history'][-1]
+            self.assertEqual(historical['inventory']['example.py']['sha256'],checksum)
+            self.assertEqual(course.verify_snapshot(historical),'snapshot_hashes_match')
+            row=self.f.context(0,30)['code_stages'][0]
+            self.assertFalse(row['stale']);self.assertTrue(row['historical'])
+        else:
+            # POSIX retains the original successful mutation/detection scenario.
+            p.chmod(0o600);p.write_text('bad')
+            self.assertTrue(self.f.context(0,30)['code_stages'][0]['stale'])
+        self.assertEqual((Path(self.data()['code']['snapshot'])/'example.py').read_text(),'x=2')
+        self.assertEqual(registry.read_bytes(),registered)
+        self.assertEqual(progress.read_bytes(),progress_before)
+        self.assertEqual(foreign.read_bytes(),b'FOREIGN DATA')
     def test_invalid_inputs_do_not_publish(self):
         for kw in [dict(start=-1),dict(end=90),dict(frames=[]),dict(file='../example.py'),dict(code_sha256='a'*64),
                    dict(frames=[dict(time=11,sha256='a'*64)]),dict(match='confirmed'),dict(start=True),dict(end=float('nan'))]:
