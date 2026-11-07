@@ -2,6 +2,8 @@
 from concurrent.futures import ThreadPoolExecutor
 import contextlib
 import io
+import os
+from contextvars import ContextVar
 from pathlib import Path
 import threading
 import subprocess
@@ -26,6 +28,29 @@ class ImportRollback(unittest.TestCase):
         with contextlib.redirect_stdout(io.StringIO()):
             course.attach(self.f.args(kind=kind,source=str(source or self.source),none=False,ref=None,resource_type='file'))
 
+    @contextlib.contextmanager
+    def publication_fault(self, fault):
+        """Inject at the running backend; preserve POSIX and independent workers."""
+        active = ContextVar('rollback_injection_active', default=False)
+        hits = []
+        def dispatch(resume, args, directory):
+            if active.get(): return resume()
+            token = active.set(True)
+            hits.append(directory)
+            try: return fault(resume, args, directory)
+            finally: active.reset(token)
+        if os.name == 'nt':
+            from windows_material_import import SingleFile
+            owner, original = SingleFile, SingleFile.publish
+            def publish(attempt, args, source):
+                return dispatch(lambda: original(attempt, args, source), args, attempt.directory)
+        else:
+            owner, original = secure, secure.publish
+            def publish(args, directory, *a, **kw):
+                return dispatch(lambda: original(args, directory, *a, **kw), args, directory)
+        with patch.object(owner, 'publish', publish): yield hits
+        self.assertTrue(hits, 'The selected backend publication fault must execute')
+
     def files(self):
         return {str(p.relative_to(self.directory)):p.read_bytes() for p in self.directory.rglob('*') if p.is_file()}
 
@@ -34,15 +59,21 @@ class ImportRollback(unittest.TestCase):
             with self.subTest(kind=kind):
                 self.attach(kind)
                 before=self.files()
-                with patch.object(secure,'publish',side_effect=KeyboardInterrupt('cancel import')):
+                def fail(*a): raise KeyboardInterrupt('cancel import')
+                with self.publication_fault(fail):
                     with self.assertRaises(KeyboardInterrupt):self.attach(kind)
                 self.assertTrue(all(self.files()[name]==value for name,value in before.items()))
                 self.assertEqual(self.source.read_text(),'user original')
 
     def test_failed_verification_keeps_unregistered_readonly_snapshot(self):
         before=self.files()
-        with patch.object(safe.Attempt,'check',side_effect=ValueError('seal failed')):
+        if os.name == 'nt':
+            from windows_material_import import SingleFile
+            owner, method = SingleFile, 'verify'
+        else: owner, method = safe.Attempt, 'check'
+        with patch.object(owner, method, side_effect=ValueError('seal failed')) as failure:
             with self.assertRaisesRegex(ValueError,'seal failed'):self.attach('code')
+        failure.assert_called_once()
         self.assertTrue(all(self.files()[name]==value for name,value in before.items()))
         self.assertEqual(len(list((self.directory/'code').iterdir())),1)
 
@@ -50,9 +81,17 @@ class ImportRollback(unittest.TestCase):
         folder=self.f.directory/'code-source';folder.mkdir()
         try:(folder/'link').symlink_to(self.source)
         except OSError:self.skipTest('Symlink creation unavailable')
-        with self.assertRaises(ValueError):self.attach('code',folder)
+        before = self.files()
+        if os.name == 'nt':
+            from windows_managed_home import NativeError
+            with self.assertRaises(NativeError) as rejected: self.attach('code',folder)
+            self.assertEqual(rejected.exception.status, 0xC00000BA, 'Single-file backend refuses a directory')
+            self.assertEqual(self.files(), before)
+            self.assertFalse((self.directory/'code').exists())
+        else:
+            with self.assertRaises(ValueError):self.attach('code',folder)
+            self.assertTrue(list((self.directory/'code').iterdir()))
         self.assertEqual(self.source.read_text(),'user original')
-        self.assertTrue(list((self.directory/'code').iterdir()))
 
     def test_error_after_atomic_save_preserves_registered_copy_and_raw_origin(self):
         source=self.f.directory/'homework.html';source.write_text('<p>Task</p>')
@@ -87,19 +126,20 @@ class ImportRollback(unittest.TestCase):
 
     def test_concurrent_failure_cannot_remove_successful_import(self):
         self.attach('code')
-        barrier=threading.Barrier(2);local=threading.local();update=secure.publish
-        def guarded(*a,**kw):
+        barrier=threading.Barrier(2); failing=ContextVar('rollback_worker_fails', default=False)
+        def guarded(resume, args, directory):
             barrier.wait(timeout=5)
-            if local.fail:raise ValueError('one attempt failed')
-            return update(*a,**kw)
+            if failing.get():raise ValueError('one attempt failed')
+            return resume()
         def worker(fail):
-            local.fail=fail
+            failing.set(fail)
             try:course.attach(self.f.args(kind='code',source=str(self.source),none=False,ref=None,resource_type='file'))
             except ValueError:
                 if not fail:raise
-        with patch.object(secure,'publish',side_effect=guarded),contextlib.redirect_stdout(io.StringIO()),ThreadPoolExecutor(2) as pool:
+        with self.publication_fault(guarded) as hits,contextlib.redirect_stdout(io.StringIO()),ThreadPoolExecutor(2) as pool:
             jobs=[pool.submit(worker,flag) for flag in (True,False)]
             for job in jobs:job.result(timeout=10)
+        self.assertEqual(len(hits), 2, 'Both independent importers must reach publication')
         row=course.read(self.directory/'lesson.json')['code']
         self.assertEqual(course.verify_snapshot(row),'snapshot_hashes_match')
         self.assertEqual(len(list((self.directory/'code').iterdir())),3)
@@ -108,7 +148,12 @@ class ImportRollback(unittest.TestCase):
         target=self.directory/'homework'/('a'*12)
         target.mkdir(parents=True);(target/'keep').write_text('foreign file')
         with patch.object(course.uuid,'uuid4',return_value=NS(hex='a'*32)):
-            with self.assertRaises(FileExistsError):self.attach('homework')
+            if os.name == 'nt':
+                from windows_managed_home import NativeError
+                with self.assertRaises(NativeError) as collision: self.attach('homework')
+                self.assertEqual(collision.exception.status, 0xC0000035)
+            else:
+                with self.assertRaises(FileExistsError):self.attach('homework')
         self.assertEqual((target/'keep').read_text(),'foreign file')
 
     def test_failed_prepared_import_preserves_original_and_warns_about_residue(self):
@@ -126,8 +171,24 @@ class ImportRollback(unittest.TestCase):
     def test_interrupted_copy_preserves_original_and_allows_retry(self):
         before=self.files()
         def fail(*a,**kw):raise KeyboardInterrupt('copy interrupted')
-        with patch.object(safe.Attempt,'copy',side_effect=fail):
-            with self.assertRaises(KeyboardInterrupt):self.attach('homework')
+        if os.name == 'nt':
+            from windows_material_import import SingleFile
+            original = SingleFile.read
+            hits = []
+            def read(attempt, handle):
+                # Initial registry read has one session; source read has two,
+                # before snapshot allocation. An unrelated early refusal fails.
+                if len(attempt.sessions) == 2:
+                    hits.append(True)
+                    return fail()
+                return original(attempt, handle)
+            with patch.object(SingleFile, 'read', read):
+                with self.assertRaises(KeyboardInterrupt):self.attach('homework')
+            self.assertEqual(hits, [True])
+        else:
+            with patch.object(safe.Attempt,'copy',side_effect=fail) as failure:
+                with self.assertRaises(KeyboardInterrupt):self.attach('homework')
+            failure.assert_called_once()
         self.assertEqual(self.files(),before)
         self.assertEqual(self.source.read_text(),'user original')
         self.attach('homework')
@@ -144,22 +205,27 @@ class ImportRollback(unittest.TestCase):
         self.assertTrue(all(Path(p).is_dir() for p in paths))
 
     def test_registered_snapshot_in_history_is_not_rolled_back(self):
-        update=secure.publish
-        def fail_after_replacement(*a,**kw):
-            update(*a,**kw)
-            with patch.object(secure,'publish',update):self.attach('code')
+        def fail_after_replacement(resume, args, directory):
+            resume()
+            if os.name == 'nt':
+                # One file per attempt: the next writer owns its own context.
+                from material_import import _CURRENT
+                token = _CURRENT.set(None)
+                try: self.attach('code')
+                finally: _CURRENT.reset(token)
+            else: self.attach('code')
             raise OSError('after another registration')
-        with patch.object(secure,'publish',side_effect=fail_after_replacement):
+        with self.publication_fault(fail_after_replacement):
             with self.assertRaises(OSError):self.attach('code')
         row=course.read(self.directory/'lesson.json')['code']
         self.assertEqual(len([p for p in row['history'] if 'snapshot' in p]),1)
         self.assertTrue(all(Path(v['snapshot']).is_dir() for v in [row]+row['history'] if 'snapshot' in v))
 
     def test_unreadable_registry_preserves_uncertain_attempt(self):
-        def fail(args,directory,*a,**kw):
+        def fail(resume,args,directory):
             (directory/'lesson.json').write_text('{');raise ValueError('registration failed')
         errors=io.StringIO()
-        with patch.object(secure,'publish',side_effect=fail),contextlib.redirect_stderr(errors):
+        with self.publication_fault(fail),contextlib.redirect_stderr(errors):
             with self.assertRaisesRegex(ValueError,'registration failed'):self.attach('code')
         self.assertIn('preserved',errors.getvalue())
         self.assertEqual(len(list((self.directory/'code').iterdir())),1)

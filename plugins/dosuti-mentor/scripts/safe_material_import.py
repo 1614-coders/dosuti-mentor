@@ -241,6 +241,9 @@ def current(directory):
 
 
 def attach(args, directory):
+    if sys.platform == 'win32':
+        from windows_material_import import attach_single
+        return attach_single(args, directory)
     import course
     attempt = current(directory)
     source = Path(args.source).expanduser().absolute()
