@@ -152,6 +152,9 @@ def _resource(args):
     if original is None:raise ValueError('Unknown resource ID')
     if original.get('kind')=='video':raise ValueError('Prepare video resources as videos; text extraction does not process video')
     if sys.platform=='win32':
+        if args.action=='fetch':
+            from windows_pdf_intake import registered_pdf,fetch_pdf
+            if registered_pdf(original):return fetch_pdf(args,directory,original)
         from windows_resource_text import eligible,resource_text
         if eligible(original,args):return resource_text(args,directory,original)
     item=deepcopy(original)

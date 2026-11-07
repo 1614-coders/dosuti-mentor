@@ -242,6 +242,9 @@ def current(directory):
 
 def attach(args, directory):
     if sys.platform == 'win32':
+        if args.kind == 'resources' and Path(args.source).suffix.lower() == '.pdf':
+            from windows_pdf_intake import attach_pdf
+            return attach_pdf(args, directory)
         from windows_material_import import attach_single
         return attach_single(args, directory)
     import course
