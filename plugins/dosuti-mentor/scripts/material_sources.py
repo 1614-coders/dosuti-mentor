@@ -3,7 +3,7 @@ from copy import deepcopy
 from html.parser import HTMLParser
 import hashlib,json
 from pathlib import Path,PurePosixPath,PureWindowsPath
-import shutil,subprocess,uuid,zipfile
+import shutil,subprocess,sys,uuid,zipfile
 from urllib.parse import urlsplit
 from source_integrity import file_hash
 from storage_paths import source_kind
@@ -151,6 +151,9 @@ def _resource(args):
     original=next((i for i in items if i['id']==args.resource_id),None)
     if original is None:raise ValueError('Unknown resource ID')
     if original.get('kind')=='video':raise ValueError('Prepare video resources as videos; text extraction does not process video')
+    if sys.platform=='win32':
+        from windows_resource_text import eligible,resource_text
+        if eligible(original,args):return resource_text(args,directory,original)
     item=deepcopy(original)
     if args.action in ('fetch','extract'):
         if not item.get('origin'):

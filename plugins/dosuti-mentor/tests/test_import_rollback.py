@@ -108,11 +108,21 @@ class ImportRollback(unittest.TestCase):
     def test_resource_text_survives_error_after_its_registration(self):
         self.attach('resources')
         row=course.read(self.directory/'lesson.json')['resources']['items'][0]
-        publish=secure.publish
-        def fail(*a,**kw):publish(*a,**kw);raise OSError('after atomic save')
-        with patch.object(secure,'publish',side_effect=fail):
-            with self.assertRaises(OSError):
+        hits = []
+        if os.name == 'nt':
+            from windows_resource_text import ResourceText
+            owner, method, publish = ResourceText, 'commit', ResourceText.commit
+            def fail(attempt):
+                result = publish(attempt); hits.append(True)
+                raise OSError('after atomic save')
+        else:
+            owner, method, publish = secure, 'publish', secure.publish
+            def fail(*a,**kw):
+                publish(*a,**kw); hits.append(True); raise OSError('after atomic save')
+        with patch.object(owner, method, fail):
+            with self.assertRaisesRegex(OSError, 'after atomic save'):
                 materials.resource(self.f.args(action='extract',resource_id=row['id'],expected_revision=None,notes=None))
+        self.assertEqual(hits, [True], 'Post-extraction commit fault must actually run')
         current=materials.resource(self.f.args(action='list'))['items'][0]
         self.assertEqual(current['text_integrity'],'verified')
         self.assertEqual(current['source_integrity'],'verified')
@@ -253,13 +263,24 @@ class ImportRollback(unittest.TestCase):
     def test_resource_cas_failure_removes_new_text_but_preserves_old_raw(self):
         self.attach('resources')
         row=course.read(self.directory/'lesson.json')['resources']['items'][0]
-        update=secure.publish
-        def replace(args,directory,fd,guard,material,**kw):
-            course.update_lesson(directory,lambda data:data.update(resources=dict(status='absent',items=[])))
-            return update(args,directory,fd,guard,material,**kw)
-        with patch.object(secure,'publish',side_effect=replace):
+        hits = []
+        if os.name == 'nt':
+            from windows_resource_text import ResourceText
+            owner, method, update = ResourceText, 'commit', ResourceText.commit
+            def replace(attempt):
+                hits.append(True)
+                course.update_lesson(attempt.directory,lambda data:data.update(resources=dict(status='absent',items=[])))
+                return update(attempt)
+        else:
+            owner, method, update = secure, 'publish', secure.publish
+            def replace(args,directory,fd,guard,material,**kw):
+                hits.append(True)
+                course.update_lesson(directory,lambda data:data.update(resources=dict(status='absent',items=[])))
+                return update(args,directory,fd,guard,material,**kw)
+        with patch.object(owner, method, replace):
             with self.assertRaisesRegex(ValueError,'concurrently'):
                 materials.resource(self.f.args(action='extract',resource_id=row['id'],expected_revision=None,notes=None))
+        self.assertEqual(hits, [True], 'Concurrent resource change must actually execute')
         self.assertTrue(Path(row['origin']['raw_file']).is_file())
         self.assertFalse(list((self.directory/'resources').glob('text-*')))
 
