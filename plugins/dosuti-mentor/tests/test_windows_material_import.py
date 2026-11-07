@@ -208,6 +208,11 @@ class MaterialModels(unittest.TestCase):
         self.assertEqual(session.handles, [])
 
     def test_bound_registry_refuses_other_lesson_before_transaction(self):
+        fixture = NativeSingleFile('test_round_trip_all_single_file_kinds_and_history')
+        fixture.setUp()  # Files/JSON only; no native Windows operations.
+        self.addCleanup(fixture.doCleanups)
+        encoded = course.anchored(course.read(fixture.registry), fixture.registry)
+        self.assertEqual(encoded['video']['source'], 'https://example.test/video')
         store = win.BoundRegistry(Path.cwd(), ('expected', b'id'))
         store.session, store.parent = NS(inspect=Mock(return_value=(('foreign', b'id'), 0))), 123
         with patch.object(win.WindowsRegistry, '__enter__', return_value=store), \
@@ -236,7 +241,7 @@ class NativeSingleFile(unittest.TestCase):
         self.directory.mkdir()
         self.registry = self.directory / 'lesson.json'
         self.registry.write_text(json.dumps(dict(id='lesson-01', revision=0, code={}, homework={},
-            resources={'items': []}, video={})), encoding='utf-8')
+            resources={'items': []}, video={'source': 'https://example.test/video'})), encoding='utf-8')
         self.original = self.registry.read_bytes()
         self.source = self.root / 'пример with spaces.py'
         self.payload = (b'\tprint("example")\r\n' * 400) + b'# no final newline'
