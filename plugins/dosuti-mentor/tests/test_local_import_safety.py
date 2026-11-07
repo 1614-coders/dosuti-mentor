@@ -316,7 +316,9 @@ course.attach(NS(course=Path(sys.argv[1]),lesson='lesson-01',kind='code',source=
 class LocalImportRefusal(LocalImportFixture):
     def test_unavailable_primitives_refuse_every_local_material_without_writes(self):
         before=self.snapshot(self.f.path)
-        with patch.object(safe.secure,'supported',return_value=False):
+        with patch.object(safe.secure,'supported',return_value=False), \
+                patch('windows_material_import.Security', side_effect=ValueError(
+                    'Safe material import is unavailable: native security primitives unavailable')):
             for kind in ('code','homework','resources'):
                 with self.subTest(kind=kind),self.assertRaisesRegex(ValueError,'Safe material import is unavailable'):
                     self.attach(kind)

@@ -16,6 +16,7 @@ WINDOWS_MODULES = (
     'test_progress_initialization',
     'test_home_initialization',
     'test_windows_managed_home',
+    'test_windows_material_import',
     'test_registry_update',
     'test_publication',
     'test_publication_safety',
