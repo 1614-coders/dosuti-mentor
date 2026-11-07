@@ -220,10 +220,19 @@ class HomeInitialization(unittest.TestCase):
 
     def test_interrupted_staging_is_not_adopted_or_deleted_by_retry(self):
         process = self.child(mode='staged')
-        self.assertEqual(process.stdout.readline().strip(), 'ready')
-        staged = {p: p.read_bytes() for p in self.root.iterdir() if p.is_file()}
-        self.assertEqual(len(staged), 1)
-        process.kill(); process.wait(timeout=10)
+        self.assertEqual(self.barrier_line(process), 'ready')
+        paths = [p for p in self.root.iterdir() if p.name.startswith('.dosuti-home-')]
+        self.assertEqual(len(paths), 1)
+        self.assertIsNone(process.poll(), 'Staging writer must still be at its barrier')
+        # Do not read a Windows staging file while the child owns its HANDLE.
+        process.terminate()
+        output, error = process.communicate(timeout=10)
+        self.assertIsNotNone(process.returncode)
+        self.assertNotEqual(process.returncode, 0, output + error)
+        staged = {p: p.read_bytes() for p in paths}
+        payload = json.loads(next(iter(staged.values())))
+        self.assertEqual(payload['schema'], 'dosuti_home_v1')
+        self.assertRegex(payload['id'], '^[0-9a-f]{32}$')
         storage.initialize(self.home)
         self.assertEqual({p: p.read_bytes() for p in staged}, staged)
         self.assertNotEqual(json.loads(next(iter(staged.values())))['id'],
