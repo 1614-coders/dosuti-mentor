@@ -10,7 +10,7 @@ import subprocess
 import tempfile
 import threading
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import redirect_stdout
+from contextlib import closing, redirect_stdout
 from types import SimpleNamespace as NS
 import unittest
 from unittest.mock import Mock, patch
@@ -128,7 +128,7 @@ class NativeResourceText(unittest.TestCase):
         self.registry.write_text(json.dumps(dict(id='lesson-01', revision=0, code={}, homework={},
             resources=dict(items=[]), video=dict(source='https://example.test/video'))), encoding='utf-8')
         self.progress = self.course / 'learners/default/progress.sqlite3'; self.progress.parent.mkdir(parents=True)
-        with sqlite3.connect(self.progress) as db:
+        with closing(sqlite3.connect(self.progress)) as db, db:
             db.execute('CREATE TABLE fixture_progress (value TEXT)')
             db.execute('INSERT INTO fixture_progress VALUES (?)', ('Existing learner progress',))
         self.progress_bytes = self.progress.read_bytes()
