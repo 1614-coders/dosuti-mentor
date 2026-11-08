@@ -19,6 +19,7 @@ WINDOWS_MODULES = (
     'test_windows_material_import',
     'test_windows_resource_text',
     'test_windows_pdf_intake',
+    'test_windows_homework',
     'test_registry_update',
     'test_publication',
     'test_publication_safety',
