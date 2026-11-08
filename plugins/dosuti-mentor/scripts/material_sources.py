@@ -80,6 +80,10 @@ def attach_material(args):
     import course as c
     directory=c.lesson_path(args)
     source_kind(args.source)  # Validate before acquire creates temporary files.
+    if (sys.platform=='win32' and args.kind=='homework' and source_kind(args.source)=='local'
+            and Path(args.source).suffix.lower() not in ('.pdf','.html','.htm','.zip')):
+        from windows_homework import attach_homework
+        return attach_homework(args,directory)
     raw,origin=acquire(directory,args.source)
     target=raw
     if args.kind=='homework':
