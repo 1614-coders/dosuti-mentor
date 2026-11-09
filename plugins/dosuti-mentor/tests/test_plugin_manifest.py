@@ -70,14 +70,41 @@ class PluginManifest(unittest.TestCase):
         marketplace = json.loads((REPO / '.agents/plugins/marketplace.json').read_text(encoding='utf-8'))
         self.assertEqual(marketplace['name'], 'dosuti-mentor-local')
         entry = next(row for row in marketplace['plugins'] if row['name'] == read('plugin.json')['name'])
-        self.assertEqual(entry['source']['source'], 'local')
+        self.assertEqual(entry['source']['source'], 'git-subdir')
+        self.assertEqual(entry['source']['url'], 'https://github.com/1614-coders/dosuti-mentor.git')
+        self.assertEqual(entry['source']['ref'], 'main')
+        self.assertNotIn('sha', entry['source'])
         self.assertEqual((REPO / entry['source']['path']).resolve(), PLUGIN.resolve())
+
+    def test_installation_commands_pin_official_marketplace_to_main(self):
+        pages = [REPO / 'README.md', REPO / 'docs/technical-guide.md',
+                 PLUGIN / 'references/installation.md']
+        for page in pages:
+            text = page.read_text(encoding='utf-8')
+            commands = re.findall(r'^\s*codex plugin marketplace add[^\n]+', text, re.M)
+            with self.subTest(page=page.name):
+                self.assertTrue(commands)
+                for command in commands:
+                    self.assertEqual(command.strip().split(), [
+                        'codex', 'plugin', 'marketplace', 'add',
+                        '1614-coders/dosuti-mentor', '--ref', 'main'])
+
+    def test_existing_source_transition_is_explicit_and_preserves_data(self):
+        text = (PLUGIN / 'references/installation.md').read_text(encoding='utf-8')
+        self.assertIn('## Переход со старого источника на main', text)
+        for required in ('явное согласие', 'локальный источник',
+                         'codex plugin marketplace remove dosuti-mentor-local',
+                         'не удаляй', 'DATA_ROOT', 'прав записи в GitHub'):
+            with self.subTest(required=required):
+                self.assertIn(required, text)
 
     def test_release_headings_match_manifest_version(self):
         version = read('plugin.json')['version']
         readme = (REPO / 'README.md').read_text(encoding='utf-8')
         changelog = (REPO / 'CHANGELOG.md').read_text(encoding='utf-8')
-        self.assertIn('## Подготовка версии ' + version + ':', readme)
+        development = re.search(r'^Версия разработки: \*\*([0-9.]+)\*\*', readme, re.M)
+        self.assertIsNotNone(development)
+        self.assertEqual(development.group(1), version)
         first = re.search(r'^## (\d+\.\d+\.\d+)\b', changelog, re.M)
         self.assertIsNotNone(first)
         self.assertEqual(first.group(1), version)

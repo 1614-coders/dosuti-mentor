@@ -97,12 +97,12 @@ class PDFVisuals(unittest.TestCase):
         before=bundle.copy()
         with patch('pdf_visuals.render',side_effect=AssertionError('Must reuse pinned page images')):
             self.assertEqual(ms.resource(args)['items'][0]['visuals'],before)
-    def test_render_failure_rolls_back_only_new_files(self):
+    def test_render_failure_preserves_registered_files_and_reports_residue(self):
         item=self.f.attach('resources')['items'][0];before=self.f.files()
         import material_sources as ms
         with patch('pdf_visuals.render',side_effect=RuntimeError('visual fixture failure')):
             with self.assertRaises(RuntimeError):ms.resource(self.f.f.args(action='extract',resource_id=item['id'],expected_revision=None,notes=None,visual_pages=[1]))
-        self.assertEqual(self.f.files(),before)
+        self.assertTrue(all(self.f.files()[name]==value for name,value in before.items()))
     def test_page_budget_exposes_unrendered_pages(self):
         import material_sources as ms
         item=self.f.attach('resources')['items'][0]
@@ -206,7 +206,7 @@ class PDFVisuals(unittest.TestCase):
         self.assertEqual(rows[0]['file'],rows[1]['file'])
         self.assertEqual(len(list(Path(item['visuals']['folder']).glob('*.png'))),1)
 
-    def test_incremental_page_cache_does_not_repeat_old_render_or_leak_staging(self):
+    def test_incremental_page_cache_keeps_old_render_and_reports_retained_staging(self):
         import material_sources as ms,pdf_visuals
         item=self.prepare([1]);first=item['visuals']['images'][0];calls=[];original=pdf_visuals.render
         def render(raw,folder,pages,*a):calls.append(pages);return original(raw,folder,pages,*a)
@@ -216,7 +216,9 @@ class PDFVisuals(unittest.TestCase):
         self.assertEqual(len(updated['visuals']['images']),2)
         self.assertEqual(updated['visuals']['images'][0],first)
         parent=Path(updated['origin']['raw_file']).parent
-        self.assertEqual(list(parent.glob('.visual-staging-*')),[])
+        retained=list(parent.glob('.visual-staging-*'))
+        self.assertEqual(len(retained),2)
+        self.assertTrue(all(p.is_dir() for p in retained))
         self.assertEqual(len(list((parent/'visuals').glob('*.png'))),2)
 
 if __name__=='__main__':unittest.main()

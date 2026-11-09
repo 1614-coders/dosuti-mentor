@@ -77,11 +77,13 @@ competence, rationale, explanation и verdict. Его полностью сог�
 компетенции. Это намеренный безопасный fallback из задания, а не попытка
 сымитировать семантическую проверку дополнительным флагом.
 
+Номера строк ниже исторические (0.4.74); ссылки ведут к текущим файлам для навигации.
+
 Код:
-[target_alignment:152](/Users/fadeevtimofey/Documents/Codex/2026-10-12/new-chat/work/dosuti-alignment-0474/plugins/dosuti-mentor/scripts/learning_intent.py:152),
-[отключение автоматического зачёта:354](/Users/fadeevtimofey/Documents/Codex/2026-10-12/new-chat/work/dosuti-alignment-0474/plugins/dosuti-mentor/scripts/learning_intent.py:354),
-[раздельный прогресс:366](/Users/fadeevtimofey/Documents/Codex/2026-10-12/new-chat/work/dosuti-alignment-0474/plugins/dosuti-mentor/scripts/learning_intent.py:366),
-[непроверенный статус и сохранение пробелов:124](/Users/fadeevtimofey/Documents/Codex/2026-10-12/new-chat/work/dosuti-alignment-0474/plugins/dosuti-mentor/scripts/adaptive_learning.py:124).
+[target_alignment:152](../../plugins/dosuti-mentor/scripts/learning_intent.py),
+[отключение автоматического зачёта:354](../../plugins/dosuti-mentor/scripts/learning_intent.py),
+[раздельный прогресс:366](../../plugins/dosuti-mentor/scripts/learning_intent.py),
+[непроверенный статус и сохранение пробелов:124](../../plugins/dosuti-mentor/scripts/adaptive_learning.py).
 
 ## Защита P2: целостный адресуемый фрагмент
 
@@ -97,12 +99,12 @@ competence, rationale, explanation и verdict. Его полностью сог�
 но неподходящая цитата также не даёт зачёта. Не заявляется автоматическое
 понимание Java, содержания источников или правильности explanation.
 
-Код: [границы цитаты:173](/Users/fadeevtimofey/Documents/Codex/2026-10-12/new-chat/work/dosuti-alignment-0474/plugins/dosuti-mentor/scripts/learning_intent.py:173).
+Код: [границы цитаты:173](../../plugins/dosuti-mentor/scripts/learning_intent.py).
 Полный валидный Map проверяется отдельно от короткого фрагмента.
 
 ## Регрессии и совместимость
 
-В [test_alignment_trust.py](/Users/fadeevtimofey/Documents/Codex/2026-10-12/new-chat/work/dosuti-alignment-0474/plugins/dosuti-mentor/tests/test_alignment_trust.py)
+В [test_alignment_trust.py](../../plugins/dosuti-mentor/tests/test_alignment_trust.py)
 добавлены восемь тестовых методов:
 
 1. Ошибочный полностью согласованный supported HashMap→concurrency; no completed_steps,

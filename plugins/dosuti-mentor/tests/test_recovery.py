@@ -303,19 +303,22 @@ class JobRecovery(unittest.TestCase):
         self.assertEqual(again, target)
         self.assertEqual(json.loads((again / 'visual_notes.json').read_text())['observations'][0]['topic'], 'Teacher correction')
 
-    def test_failed_publication_does_not_expose_partial_fragment(self):
+    def test_failed_publication_does_not_expose_valid_partial_fragment(self):
+        import safe_material_import
         self.run_job()
         prepared = self.root / 'prepared'
-        original = publication.shutil.copyfile
-        def corrupt(src, dst, **kw):
-            result = original(src, dst, **kw)
-            if Path(dst).name == 'transcript.json':
-                Path(dst).write_text('[]')
+        original = safe_material_import.Attempt.copy
+        def corrupt(attempt, src, parent, name, **kw):
+            result = original(attempt, src, parent, name, **kw)
+            if name == 'transcript.json': Path(kw['destination']).write_text('[]')
             return result
-        with patch.object(publication.shutil, 'copyfile', corrupt):
-            with self.assertRaises(ValueError):
-                publication.publish_job(self.out, prepared, 'key')
-        self.assertEqual(list(prepared.glob('v4-*')), [])
+        errors=io.StringIO()
+        with patch.object(safe_material_import.Attempt, 'copy', corrupt),contextlib.redirect_stderr(errors):
+            with self.assertRaises(ValueError):publication.publish_job(self.out, prepared, 'key')
+        partial=list(prepared.glob('v4-*'));self.assertEqual(len(partial),1)
+        self.assertFalse(publication.valid_publication(partial[0],'key',file_hash(self.video)))
+        self.assertFalse((partial[0]/'publication.json').exists())
+        self.assertIn('preserved',errors.getvalue())
         self.assertEqual(list(prepared.glob('.pending-*')), [])
 
     def test_damaged_publication_creates_new_copy_without_overwriting_old(self):

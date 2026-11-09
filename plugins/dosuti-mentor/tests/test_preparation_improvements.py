@@ -165,23 +165,28 @@ class SpaceChecks(unittest.TestCase):
 
     def test_direct_head_size_blocks_before_body(self):
         with tempfile.TemporaryDirectory() as tmp:
+            tmp = str(Path(tmp).resolve())
             target = Path(tmp)/'video.mp4'
             def metadata(command, **kwargs):
                 self.assertIn('--head', command)  # A body transfer would fail this assertion.
-                Path(command[command.index('--dump-header')+1]).write_text('HTTP/1.1 200 OK\r\nContent-Length: 1000\r\n\r\n')
+                self.assertEqual(command[command.index('--dump-header')+1],'-')
+                kwargs['stdout'].write(b'HTTP/1.1 200 OK\r\nContent-Length: 1000\r\n\r\n')
+                kwargs['stdout'].flush()
                 return NS(returncode=0)
             with patch.object(http_resume, 'preparation_run', side_effect=metadata), patch.object(download_space.shutil, 'disk_usage', return_value=NS(free=10)):
                 with self.assertRaisesRegex(ValueError, 'перед скачиванием'): http_resume.download('https://example.invalid/v.mp4', target)
             self.assertFalse(target.exists())
-            self.assertEqual(list(Path(tmp).iterdir()), [])
+            self.assertEqual(len(list(Path(tmp).glob('.http-*.lock'))),1)
+            self.assertEqual(len(list(Path(tmp).iterdir())),1)  # Stable lock only; no payload or receipt.
 
     def test_known_yandex_size_does_not_make_an_extra_head_request(self):
         with tempfile.TemporaryDirectory() as tmp:
+            tmp = str(Path(tmp).resolve())
             target = Path(tmp)/'video.mp4'
             def transfer(command, **kwargs):
                 self.assertNotIn('--head', command)
-                Path(command[command.index('--dump-header')+1]).write_text('HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\n')
-                Path(command[command.index('--output')+1]).write_bytes(b'abc')
+                os.write(int(command[command.index('--dump-header')+1].rsplit('/',1)[1]),b'HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\n')
+                kwargs['stdout'].write(b'abc');kwargs['stdout'].flush()
                 return NS(returncode=0)
             with patch.object(http_resume, 'preparation_run', side_effect=transfer) as transport:
                 http_resume.download('https://example.invalid/signed', target, known_size=3)

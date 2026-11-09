@@ -3,6 +3,7 @@ import hashlib
 import io
 import json
 import math
+import os
 from pathlib import Path
 import sys
 from profile_storage import checked
@@ -46,9 +47,12 @@ def verify(bundle,raw,expected):
 def render(raw,folder,pages,expected,budget):
     from preparation_control import run
     import subprocess
+    from material_import import _CURRENT
+    attempt=_CURRENT.get()['safe']
+    output_fd=attempt.guard.pin(folder);attempt.check()
     try:
         result=run([sys.executable,'-B',str(Path(__file__).resolve()),str(raw),str(folder),expected,
-                    json.dumps(pages),json.dumps(budget)],capture_output=True,encoding='utf-8',timeout=budget['timeout_seconds'])
+                    json.dumps(pages),json.dumps(budget),str(output_fd)],pass_fds=(output_fd,),capture_output=True,encoding='utf-8',timeout=budget['timeout_seconds'])
     except subprocess.TimeoutExpired as error:raise ValueError('PDF visuals timed out; no partial images registered') from error
     if result.returncode:raise ValueError('PDF visual rendering failed or exceeded limits; no partial images registered')
     try:
@@ -66,8 +70,9 @@ def validate_pages(pages):
 
 
 def prepare(raw,item,pages):
-    from material_import import reserve
-    import shutil
+    from material_import import _CURRENT
+    from safe_material_import import current
+    attempt=current(_CURRENT.get()['directory'])
     import uuid
     budget=limits();validate_pages(pages)
     raw=Path(raw);checked(raw)
@@ -89,19 +94,22 @@ def prepare(raw,item,pages):
     available=budget['max_disk_bytes']-(old['stored_bytes'] if old else 0)
     new=None
     if missing and capacity and available:
-        staging=reserve(raw.parent/('.visual-staging-'+uuid.uuid4().hex),directory=True)
+        parent=attempt.guard.pin(raw.parent);attempt.check()
+        staging=raw.parent/('.visual-staging-'+uuid.uuid4().hex)
+        attempt.retained.append(staging);attempt.fresh_at(parent,staging.name)
         new=render(raw,staging,missing,expected,budget|dict(max_candidates=capacity,max_disk_bytes=available))
-        if old is None:reserve(folder,directory=True)
+        if old is None:folder_fd=attempt.fresh_at(parent,folder.name)
+        else:folder_fd=attempt.guard.pin(folder)
         for row in new['images']:
             target=folder/row['file'];checked(target)
             if target.exists():
                 if file_hash(target)!=row['sha256']:raise ValueError('Existing cached image changed')
             else:
-                reserve(target)
-                shutil.copyfile(staging/row['file'],target)
-                target.chmod(target.stat().st_mode & ~0o222)
+                attempt.copy(staging/row['file'],folder_fd,row['file'],destination=target)
             known[row['page']]=row|dict(path=str(target.resolve()))
-    if old is None and not folder.exists():reserve(folder,directory=True)
+    if old is None and not folder.exists():
+        parent=attempt.guard.pin(raw.parent);attempt.check()
+        attempt.fresh_at(parent,folder.name)
     unique={r['file'] for r in known.values()}
     value=dict(schema='pdf_visuals_v1',folder=str(folder),source_sha256=expected,
         requested_pages=requested,images=list(known.values()),omitted_pages=[p for p in requested if p not in known],
@@ -127,7 +135,7 @@ def images(context):
     return rows
 
 
-def worker(raw,folder,expected,pages,budget):
+def worker(raw,folder,expected,pages,budget,output_fd=None):
     import pypdfium2 as pdfium
     raw=Path(raw);folder=Path(folder)
     if raw.stat().st_size>32*1024*1024 or file_hash(raw)!=expected:raise ValueError('PDF input changed')
@@ -157,8 +165,10 @@ def worker(raw,folder,expected,pages,budget):
                 if total+len(content)>budget['max_disk_bytes']:
                     omitted.append(page_number);continue
                 name=f'image-{checksum}.png';target=folder/name
-                with target.open('xb') as image_file:image_file.write(content)
-                target.chmod(target.stat().st_mode & ~0o222)
+                if output_fd is None:raise ValueError('Pinned PDF image output is required')
+                from safe_zip_import import new_file
+                with os.fdopen(new_file(output_fd,name),'wb') as image_file:
+                    image_file.write(content);image_file.flush();os.fsync(image_file.fileno());os.fchmod(image_file.fileno(),0o400)
                 images_by_hash[checksum]=name;total+=len(content)
             rows.append(dict(page=page_number,file=images_by_hash[checksum],sha256=checksum))
     if file_hash(raw)!=expected:raise ValueError('PDF source changed during rendering')
@@ -171,7 +181,7 @@ if __name__=='__main__':
     try:
         from pdf_limits import apply,check_memory
         job=apply()
-        value=worker(sys.argv[1],sys.argv[2],sys.argv[3],json.loads(sys.argv[4]),json.loads(sys.argv[5]))
+        value=worker(sys.argv[1],sys.argv[2],sys.argv[3],json.loads(sys.argv[4]),json.loads(sys.argv[5]),int(sys.argv[6]))
         check_memory();print(json.dumps(value))
     except Exception as error:
         print('PDF visual worker rejected input: '+type(error).__name__,file=sys.stderr);sys.exit(1)

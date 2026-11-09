@@ -12,8 +12,13 @@ class HTTPResume(unittest.TestCase):
     def response(self,status,body,headers,code=0):
         def run(cmd,**kw):
             self.calls.append(cmd)
-            Path(cmd[cmd.index('--dump-header')+1]).write_text('HTTP/1.1 '+str(status)+' Test\r\n'+''.join(k+': '+v+'\r\n' for k,v in headers.items())+'\r\n')
-            Path(cmd[cmd.index('--output')+1]).write_bytes(body)
+            text='HTTP/1.1 '+str(status)+' Test\r\n'+''.join(k+': '+v+'\r\n' for k,v in headers.items())+'\r\n'
+            if '--head' in cmd:
+                kw['stdout'].write(text.encode());kw['stdout'].flush()
+            else:
+                import os
+                os.write(int(cmd[cmd.index('--dump-header')+1].rsplit('/',1)[1]),text.encode())
+            if '--head' not in cmd:kw['stdout'].write(body);kw['stdout'].flush()
             return subprocess.CompletedProcess(cmd,code,b'',b'')
         return run
     def call(self,status,body,headers,code=0):

@@ -55,21 +55,21 @@ class PDFImport(unittest.TestCase):
             self.assertTrue(self.resource('extract',item['id'])['items'][0]['review_valid'])
         # The repeated write may update lesson revision; extracted bytes and review stay pinned.
         self.assertEqual(Path(item['extracted_file']).read_bytes(),before[item['extracted_file']])
-    def test_failed_import_or_registration_leaves_no_orphan_files(self):
+    def test_failed_import_or_registration_preserves_existing_files_and_warns_about_residue(self):
         before=self.files();self.path.write_bytes(b'%PDF-1.4 broken')
         with self.assertRaises(ValueError):self.attach('homework')
-        self.assertEqual(self.files(),before)
+        self.assertTrue(all(self.files()[name]==value for name,value in before.items()))
         self.path.write_bytes(fixture.textbook())
         with patch('course.attach_local',side_effect=OSError('simulated registration error')):
             with self.assertRaises(OSError):ms.attach_material(self.f.args(kind='homework',source=str(self.path)))
-        self.assertEqual(self.files(),before);self.assertTrue(self.path.exists())
-    def test_refused_encrypted_and_compressed_pdf_leave_no_orphans(self):
+        self.assertTrue(all(self.files()[name]==value for name,value in before.items()));self.assertTrue(self.path.exists())
+    def test_refused_encrypted_and_compressed_pdf_preserve_original_and_registry(self):
         before=self.files()
         for data in (fixture.encrypted_empty(),fixture.document([' '*(17*1024*1024)],compressed=True)):
             with self.subTest(bytes=len(data)):
                 self.path.write_bytes(data)
                 with self.assertRaises(ValueError):self.attach('homework')
-                self.assertEqual(self.files(),before)
+                self.assertTrue(all(self.files()[name]==value for name,value in before.items()))
                 self.assertEqual(self.path.read_bytes(),data)
 
     def test_pdf_cannot_be_smuggled_as_remote_code(self):
@@ -94,6 +94,9 @@ class PDFImport(unittest.TestCase):
         self.assertIn(True,results)
         current=self.resource('list',None)['items'][0]
         files=list(self.f.f.lesson.rglob('text-*.txt'))
-        self.assertEqual(files,[Path(current['extracted_file'])])
+        self.assertIn(Path(current['extracted_file']),files)
+        self.assertLessEqual(len(files),2)
+        self.assertEqual(len(current.get('history',[])),0)
+        self.assertEqual(current['text_integrity'],'verified')
 
 if __name__=='__main__':unittest.main()

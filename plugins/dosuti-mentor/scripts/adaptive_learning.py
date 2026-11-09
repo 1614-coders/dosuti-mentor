@@ -180,6 +180,82 @@ def roadmap_recommendations(intent,units,journal,now):
     return result
 
 
+def incomplete_return(reason):
+    return dict(valid=False,status='incomplete',reason=reason,stopped_at=None,actions=[])
+
+
+def returning_guidance(course_data,profile,progress,units,states,suggestions):
+    """Small read-only projection of this course/profile's already checked snapshot."""
+    if not progress['valid']:return incomplete_return(progress.get('reason','Incomplete learning data'))
+    points=[]
+    for row in progress['continuations']:
+        if not row['valid']:continue
+        context=row.get('context',{});checkpoint=row.get('checkpoint') or row.get('state') or {}
+        unit=units.get(row.get('unit'),{})
+        points.append(dict(kind=row['kind'],unit=row.get('unit'),lesson_id=row.get('lesson_id'),
+            lesson=row.get('state',{}).get('lesson'),session=row.get('session'),status=row.get('status'),
+            topic=context.get('topic') or unit.get('title') or checkpoint.get('topic'),
+            goal=context.get('goal'),recap=checkpoint.get('recap'),next_step=checkpoint.get('next_step'),
+            pending_question=checkpoint.get('pending_question')))
+    confirmed=[];unverified=[];tasks=[]
+    unfinished={r.get('lesson_id') for r in points if r.get('lesson_id')}
+    for name,state in states.items():
+        for row in state['criteria']:
+            reference=dict(unit=name,criterion=row['criterion'],evidence_revision=row['evidence_revision'])
+            if row['state'] in SUCCESS and row['time_valid']:confirmed.append(reference)
+            elif row['state'] in ('not_assessed','explained'):unverified.append(reference)
+        for task in state['practice']:
+            if not task['valid'] or (task.get('lesson_id') and task['lesson_id'] not in unfinished):continue
+            if task['last_attempt'] and task['last_attempt']['stage'] in SUCCESS:continue
+            tasks.append(dict(unit=name,task_id=task['id'],lesson_id=task.get('lesson_id'),criteria=task['criteria'],
+                help_count=len(task['help']),solution_shown=task['solution_shown'],next_action=task['next_action']))
+    diagnosis=progress['diagnostic']
+    knowledge=dict(confirmed_criteria=confirmed,unverified_criteria=unverified,gaps=progress['unit_gaps'],
+        diagnostic={key:diagnosis.get(key,[]) for key in ('confirmed_knowledge','identified_gaps','unverified_areas')})
+    actions=[]
+    def offer(action,reason,**target):
+        if len(actions)<3:actions.append(dict(action=action,reason=reason,requires_consent=True,**target))
+    if points:
+        offer('continue_lesson' if len(points)==1 else 'choose_continuation',
+              'Saved unfinished lesson' if len(points)==1 else 'Several saved continuations; learner must choose')
+    elif diagnosis['status'] in ('accepted','paused'):
+        offer('continue_diagnostic','An agreed diagnostic is unfinished; read its saved question before continuing')
+    if any(not row['valid'] for row in progress['continuations']):
+        offer('review_sources','Some saved continuations cannot be verified; do not resume them automatically')
+    error=next((r for r in suggestions if r['action']=='review_error'),None)
+    if error:offer('review_error','Recorded criterion error',unit=error['unit'],criterion=error['criterion'],
+                   evidence_revision=error['evidence_revision'])
+    elif diagnosis.get('identified_gaps'):
+        offer('review_error','Diagnostic identified a gap; no automatic unit alignment',competence=diagnosis['identified_gaps'][0])
+    eligible={(r['unit'],r['criterion']) for r in suggestions}
+    task=next((t for t in tasks if any((t['unit'],i) in eligible for i in t['criteria'])),None)
+    if task:
+        fresh=task['solution_shown'] or task['next_action']=='fresh_independent_task'
+        offer('fresh_independent_task' if fresh else 'practice',
+              'Shown assistance requires a fresh independent check' if fresh else 'An unfinished task is saved',
+              unit=task['unit'],task_id=task['task_id'],lesson_id=task['lesson_id'])
+    elif suggestions:
+        row=suggestions[0]
+        offer('fresh_independent_task' if row['action']=='fresh_independent_task' else 'practice',
+              row['action'],unit=row['unit'],criterion=row['criterion'],evidence_revision=row['evidence_revision'])
+    if len(actions)<2:offer('choose_topic','Choose a topic within this course; the accepted Roadmap remains unchanged')
+    if len(actions)<2:offer('add_material','Optionally use a learner-provided material after explicit agreement')
+    recorded=points or progress['studied_units'] or progress['studied_lessons'] or diagnosis['status'] in ('accepted','paused','completed')
+    result=dict(valid=True,status='ready' if recorded else 'no_progress',
+        course={key:course_data.get(key) for key in ('id','title')},profile=profile,
+        stopped_at=points[0] if len(points)==1 else None,continuation_choice_required=len(points)>1,
+        continuations=points,unfinished_tasks=tasks,knowledge=knowledge,actions=actions,
+        limitations=progress['limitations'],truncated_fields=[])
+    # Full originals/evidence remain in study-next/learn-unit; never silently drop counts.
+    for key,count in (('continuations','continuation_count'),('unfinished_tasks','unfinished_task_count')):
+        result[count]=len(result[key])
+        if len(result[key])>5:result['truncated_fields'].append(key);result[key]=result[key][:5]
+    for key in ('confirmed_criteria','unverified_criteria','gaps'):
+        knowledge[key+'_count']=len(knowledge[key])
+        if len(knowledge[key])>5:result['truncated_fields'].append('knowledge.'+key);knowledge[key]=knowledge[key][:5]
+    return result
+
+
 def study_next(args):
     from read_snapshot import snapshot, SnapshotChanged
     for _ in range(3):
@@ -188,28 +264,59 @@ def study_next(args):
                 return _study_next(args)
         except SnapshotChanged:
             pass
-    return dict(valid=False,reason='Learning data changed during study-next; no consistent read after 3 attempts',
+    reason='Learning data changed during study-next; no consistent read after 3 attempts'
+    result=dict(valid=False,reason=reason,returning=incomplete_return(reason),
                 recommendations=[],recovery='Retry study-next after the other chat finishes saving')
+    if getattr(args,'knowledge_map',False):
+        from knowledge_map import incomplete
+        result['knowledge_map']=incomplete(reason)
+    return result
 
 
 def _study_next(args):
     import course,study_units,unit_learning
     from learning_tools import learner
     from learning_intent import view as intent
-    root=course.root(args);course.read(root/'course.json');folder=learner(args)
+    root=course.root(args);course_data=course.read(root/'course.json')
+    if (not isinstance(course_data,dict) or type(course_data.get('schema_version')) is not int or course_data['schema_version']!=1
+            or any(not isinstance(course_data.get(key),str) or not course_data[key].strip() for key in ('id','title'))):
+        raise ValueError('Course metadata changed or is invalid; preserve data and retry after checking the course')
+    folder=learner(args)
     limit=getattr(args,'limit',5)
     if type(limit) is not int or not 1<=limit<=20:raise ValueError('limit must be 1..20')
+    knowledge_offset=getattr(args,'knowledge_offset',0)
+    if type(knowledge_offset) is not int or knowledge_offset<0:raise ValueError('knowledge offset must be nonnegative')
+    if knowledge_offset and not getattr(args,'knowledge_map',False):raise ValueError('knowledge offset requires --knowledge-map')
     session=getattr(args,'session',None)
     if session is not None:course.slug(session)
-    try:journal=unit_learning.load(folder/'unit-learning.json',compact=True,history_limit=100)
-    except (ValueError,OSError) as error:return dict(valid=False,reason=str(error),recommendations=[],recovery='Preserve and repair learner journal before using recommendations')
-    registry=study_units.load(root,include_history=False);units=study_units.checked_units(root,registry,include_contexts=False);now=course.now()
-    suggestions=[];blocked=[];continuations=[];by_unit=unit_learning.journals_by_unit(journal)
+    try:
+        journal=unit_learning.load(folder/'unit-learning.json',compact=True,history_limit=100)
+        registry=study_units.load(root,include_history=False)
+        units=study_units.checked_units(root,registry,include_contexts=False)
+    except (ValueError,OSError) as error:
+        result=dict(valid=False,reason=str(error),recommendations=[],returning=incomplete_return(str(error)),
+                    recovery='Preserve and repair learning data before using recommendations')
+        # Intake is independent of the evidence journal/registry. Keep its saved
+        # questions and explicit choice visible, without trusting broken progress.
+        from topic_queue import load as load_queue, view as queue_view
+        try:
+            queue_path,queue_state=load_queue(args,folder=folder)
+            if queue_path.exists():result['topic_queue']=queue_view(args,queue_state)
+        except (ValueError,OSError) as queue_error:
+            # A second corrupt source must not hide the original journal error.
+            result['topic_queue_error']=str(queue_error)
+        if getattr(args,'knowledge_map',False):
+            from knowledge_map import incomplete
+            result['knowledge_map']=incomplete(str(error))
+        return result
+    now=course.now()
+    suggestions=[];blocked=[];continuations=[];returning_states={};by_unit=unit_learning.journals_by_unit(journal)
     for unit in units.values():
         selected_journal=by_unit[unit['id']]
         result=recommendations(unit,selected_journal,now)
         if result['blocked']:blocked.append(dict(unit=unit['id'],reason='review_sources',details=unit['reasons']));continue
         view=unit_learning.view(args,unit,selected_journal)
+        returning_states[unit['id']]=dict(criteria=result['criteria'],practice=view['practice'],evidence=result['evidence_events'])
         if view['checkpoint']['valid'] and 'lesson_id' not in view['checkpoint']['event']['value']:continuations.append(dict(unit=unit['id'],checkpoint=view['checkpoint']))
         for action in result['next_actions']:
             suggestions.append(dict(unit=unit['id'],unit_sha256=unit['content_sha256'],prerequisites=unit['prerequisites'],**action))
@@ -222,10 +329,20 @@ def _study_next(args):
     suggestions=[confirmed_scope_advice(row) if row['unit'] in confirmed_units else row for row in suggestions]
     valid=bool(intent_view.get('valid') and intent_view['learning_progress']['valid'])
     if not valid:suggestions=[]
+    returning=returning_guidance(course_data,getattr(args,'profile','default'),
+        intent_view['learning_progress'],units,returning_states,suggestions)
     roadmap['recommendation_count']=len(roadmap['recommendations'])
     roadmap['truncated']=len(roadmap['recommendations'])>limit
     roadmap['recommendations']=roadmap['recommendations'][:limit]
-    return dict(valid=valid,profile=getattr(args,'profile','default'),session=session,journal_revision=journal['revision'],as_of=now,learning_intent=intent_view,learning_progress=intent_view['learning_progress'],
+    result=dict(valid=valid,profile=getattr(args,'profile','default'),session=session,journal_revision=journal['revision'],as_of=now,learning_intent=intent_view,learning_progress=intent_view['learning_progress'],
                 recommendations=suggestions[:limit],recommendation_count=len(suggestions),truncated=len(suggestions)>limit,
                 blocked=blocked[:limit],blocked_count=len(blocked),continuations=continuations[:limit],continuation_count=len(continuations),
-                roadmap=roadmap,policy=policy(),verification='read_only_suggestions_not_automatic_curriculum_or_grading')
+                roadmap=roadmap,returning=returning,policy=policy(),verification='read_only_suggestions_not_automatic_curriculum_or_grading')
+    from topic_queue import load as load_queue, view as queue_view
+    queue_path,queue_state=load_queue(args,folder=folder)
+    if queue_path.exists():result['topic_queue']=queue_view(args,queue_state,units=units,journal=journal)
+    if getattr(args,'knowledge_map',False):
+        from knowledge_map import build
+        result['knowledge_map']=build(course_data,getattr(args,'profile','default'),intent_view['learning_progress'],
+            units,returning_states,returning['actions'],roadmap,limit,knowledge_offset)
+    return result

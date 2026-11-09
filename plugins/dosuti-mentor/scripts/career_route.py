@@ -107,6 +107,13 @@ def compile_route(args,card):
         sample=career_evidence.career(SimpleNamespace(course=root,sample_id=draft['sample_id']))
         if not sample.get('valid') or not sample['sample']:raise ValueError('Sample missing or needs review')
         checksum=sample['sample']['content_sha256']
+        from career_market import load as load_market
+        _,permission=load_market(args)
+        if permission['revision']:
+            result=permission['result']
+            if (permission['consent']['status']!='granted' or not result or result['status']!='recorded'
+                    or result['sample_id']!=draft['sample_id'] or result['sample_sha256']!=checksum):
+                raise ValueError('No agreed current market basis; propose an ordinary roadmap instead')
     metadata=dict(sample_id=draft['sample_id'],sample_sha256=checksum,learner_context=draft['learner_context'],steps=draft['steps'])
     validate(metadata);review=status(args,metadata)
     if not review['valid']:raise ValueError('; '.join(review['reasons']))
@@ -123,7 +130,10 @@ def route(args):
     from learning_tools import read_json
     from profile_storage import checked
     from storage_lock import file_lock
+    from career_market import market
     incoming=getattr(args,'route_file',None)
+    if incoming and getattr(args,'market_file',None):raise ValueError('Save market decision and route in separate operations')
+    market_state=market(args)
     if incoming:
         # Same source lock as sample/unit writes, then the ordinary intent/profile lock.
         root=course.root(args);course.read(root/'course.json')
@@ -133,7 +143,7 @@ def route(args):
             checked(lock);proposal=compile_route(args,read_json(incoming))
             learning_intent.commit(args,dict(proposal=proposal),sources_locked=True)
     intent=learning_intent.view(args)
-    output=dict(intent=intent,verification='assistant_proposed_route_not_employment_or_readiness_prediction')
+    output=dict(intent=intent,market_research=market_state,verification='assistant_proposed_route_not_employment_or_readiness_prediction')
     for name in ('proposal','plan'):
         if intent.get(name) and 'career' in intent[name]:
             output[name]=status(args,intent[name]['career'],with_progress=True)

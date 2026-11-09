@@ -30,8 +30,9 @@ LABELS = {
 
 
 class Reporter:
-    def __init__(self, folder):
+    def __init__(self, folder, writer=None):
         self.path = Path(folder) / 'processing-status.json'
+        self.writer = writer
         self.started = time.monotonic()
         self.changed = self.started
         self.data = dict(schema='processing_status_v1', started_at=time.time())
@@ -48,7 +49,8 @@ class Reporter:
                          elapsed_seconds=round(now - self.started, 2))
         if error is not None:
             self.data['error'] = type(error).__name__ + ': ' + str(error)[:300]
-        atomic_json(self.path, self.data)
+        if self.writer is None: atomic_json(self.path, self.data)
+        else: self.writer(self.data)
         print(self.data['label'] + f" ({self.data['elapsed_seconds']} с)", flush=True)
 
 

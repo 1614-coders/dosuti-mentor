@@ -13,7 +13,7 @@ SCRIPT = Path(__file__).resolve().parents[1] / 'scripts/course.py'
 class CourseWorkflow(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
-        self.directory = Path(self.temp.name)
+        self.directory = Path(self.temp.name).resolve()
         self.course = self.directory / 'course'
         self.run_cli('init', '--title', 'Java project')
         self.run_cli('add-lesson', '--lesson', 'lesson-01', '--title', 'First', '--video', 'not-downloaded.mp4')

@@ -1,4 +1,4 @@
-import contextlib,hashlib,io,json,shutil,sys,threading,zipfile
+import contextlib,errno,hashlib,io,json,os,shutil,sys,threading,zipfile
 from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
 from pathlib import Path
 from types import SimpleNamespace as NS
@@ -49,6 +49,18 @@ class Materials(unittest.TestCase):
         return self.resource('extract',item['id'])['items'][0]
     def review(self,item,revision=None):return ms.resource(self.args(action='review',resource_id=item['id'],expected_revision=revision or item['revision'],notes='Read and checked task text'))
     def test_remote_zip_keeps_origin_and_inventory(self):
+        from safe_zip_import import supported
+        if not supported():
+            registry=self.f.lesson/'lesson.json';before=registry.read_bytes();requests=type(self).requests
+            with self.assertRaisesRegex(ValueError, '^Safe (?:material|ZIP) import is unavailable on this platform: '
+                    'descriptor-relative no-follow operations are required; no unsafe fallback was used$'):
+                self.attach('code',self.url+'/zip')
+            self.assertEqual(registry.read_bytes(),before)
+            self.assertEqual(course.read(self.f.lesson/'lesson.json')['code']['status'],'not_asked')
+            self.assertEqual(type(self).requests,requests,'Refuse before downloading any ZIP')
+            self.assertFalse((self.f.lesson/'code').exists())
+            self.assertFalse((self.f.lesson/'materials').exists())
+            return
         code=self.attach('code',self.url+'/zip');self.assertIn('src/main.py',code['inventory']);self.assertEqual(code['origin']['source'],self.url+'/zip');self.assertTrue(Path(code['origin']['raw_file']).exists())
     def test_remote_homework_html_extracts_text(self):
         hw=self.attach('homework',self.url+'/redirect');text=Path(hw['file']).read_text();self.assertIn('Print <hello>',text);self.assertNotIn('do not include',text);self.assertIn('    print(x)',text);self.assertTrue(hw['origin']['effective_url'].endswith('/article'))
@@ -86,8 +98,36 @@ class Materials(unittest.TestCase):
         course.update_lesson(self.f.lesson,lambda d:d['resources']['items'][0].update(kind='video'))
         with self.assertRaises(ValueError):self.resource('extract',item['id'])
     def test_local_resource_pinned_at_attach(self):
-        p=self.f.directory/'article.txt';p.write_text('hello');item=self.attach('resources',p)['items'][0];raw=Path(item['origin']['raw_file']);raw.chmod(0o600);raw.write_text('changed')
-        with self.assertRaises(ValueError):self.resource('extract',item['id'])
+        p=self.f.directory/'article.txt';p.write_text('hello');item=self.attach('resources',p)['items'][0]
+        raw=Path(item['origin']['raw_file'])
+        with contextlib.redirect_stdout(io.StringIO()):
+            course.progress(self.args(topic='Independent practice',stage='practice_checked',details='Preserve progress'))
+        progress=self.f.path/'learners/default/progress.sqlite3';progress_before=progress.read_bytes()
+        registry=self.f.lesson/'lesson.json';registered=registry.read_bytes()
+        foreign=self.f.directory/'foreign.txt';foreign.write_bytes(b'FOREIGN DATA')
+        if os.name == 'nt':
+            # A sealed Windows snapshot must prevent writes; no ACL repair/bypass.
+            before=raw.read_bytes()
+            with self.assertRaises(PermissionError) as blocked:raw.write_text('changed')
+            self.assertEqual(blocked.exception.errno,errno.EACCES)
+            self.assertIn(getattr(blocked.exception,'winerror',None),(None,5))
+            self.assertEqual(raw.read_bytes(),before)
+            self.assertEqual(course.file_hash(raw),item['origin']['sha256'])
+            self.assertEqual(self.resource()['items'][0]['source_integrity'],'verified')
+            self.assertEqual(registry.read_bytes(),registered)
+            extracted=self.resource('extract',item['id'])['items'][0]
+            self.assertEqual(extracted['origin'],item['origin'])
+            self.assertEqual(extracted['source_integrity'],'verified')
+            self.assertEqual(extracted['text_integrity'],'verified')
+            self.assertEqual(course.file_hash(Path(extracted['extracted_file'])),extracted['text_sha256'])
+            self.assertEqual(raw.read_bytes(),before)
+        else:
+            raw.chmod(0o600);raw.write_text('changed')
+            with self.assertRaises(ValueError):self.resource('extract',item['id'])
+            self.assertEqual(registry.read_bytes(),registered)
+        self.assertEqual(p.read_text(),'hello')
+        self.assertEqual(progress.read_bytes(),progress_before)
+        self.assertEqual(foreign.read_bytes(),b'FOREIGN DATA')
     def test_plain_resource_keeps_code_whitespace_and_verified_cache(self):
         text='\n    if ready:\n        work()\n\nExplanation.\n\n'
         source=self.f.directory/'code-notes.txt';source.write_text(text)
@@ -171,10 +211,12 @@ class Materials(unittest.TestCase):
         with zipfile.ZipFile(p,'w') as z:z.writestr('C:\\outside.py','bad')
         with self.assertRaises(ValueError):self.attach('code',p)
     def test_concurrent_replacement_rejected(self):
-        original=course.update_lesson
-        def replace(directory,callback):
-            original(directory,lambda d:d.update(resources={'status':'absent','items':[]}));original(directory,callback)
+        import safe_zip_import
+        original=safe_zip_import.publish
+        def replace(args,directory,fd,guard,material,**kw):
+            course.update_lesson(directory,lambda d:d.update(resources={'status':'absent','items':[]}))
+            return original(args,directory,fd,guard,material,**kw)
         item=self.attach('resources',self.url+'/article')['items'][0]
-        with patch.object(course,'update_lesson',side_effect=replace):
+        with patch.object(safe_zip_import,'publish',side_effect=replace):
             with self.assertRaises(ValueError):self.resource('extract',item['id'])
         self.assertEqual(self.resource()['items'],[])

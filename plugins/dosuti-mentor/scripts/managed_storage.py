@@ -12,7 +12,6 @@ import sys
 import tempfile
 import threading
 import uuid
-from atomic_files import atomic_json
 from storage_lock import file_lock
 
 MARKER = '.dosuti-home.json'
@@ -29,6 +28,9 @@ def safe(path):
 
 
 def validate(home):
+    if sys.platform == 'win32':
+        from windows_managed_home import validate as windows_validate
+        return windows_validate(home)
     home = safe(home)
     from course_lifecycle import active
     active(home)
@@ -43,17 +45,52 @@ def validate(home):
 
 
 def initialize(home, legacy_runtime=False):
+    if sys.platform == 'win32':
+        from windows_managed_home import initialize as windows_initialize
+        return windows_initialize(home, legacy_runtime=legacy_runtime)
+    from safe_material_import import Attempt, move_exclusive
     home = safe(home)
     if home == Path(home.anchor) or home == Path.home():
         raise ValueError('Choose a dedicated data folder')
-    if (home / MARKER).exists():
-        return validate(home)
-    if home.exists() and any(home.iterdir()):
-        if not (legacy_runtime and (home / 'venv/pyvenv.cfg').is_file()):
-            raise ValueError('Existing folder is not managed; choose an empty folder')
     home.mkdir(parents=True, exist_ok=True)
-    atomic_json(home / MARKER, dict(schema='dosuti_home_v1', id=uuid.uuid4().hex))
-    return home
+    # Pin every ancestor before deciding whether this home can be adopted.
+    # No subsequent publication resolves home or its parent by pathname.
+    with ExitStack() as stack:
+        owner = Attempt(home, lesson=False, readonly=False)
+        stack.callback(owner.close)
+        owner.guard.check()
+        entries = os.listdir(owner.fd)
+        if MARKER in entries:
+            owner.guard.check()
+            result = validate(home)
+            owner.guard.check()
+            return result
+        if entries:
+            if not legacy_runtime:
+                raise ValueError('Existing folder is not managed; choose an empty folder')
+            with owner.input(home / 'venv/pyvenv.cfg'):
+                pass
+        parent = owner.guard.pin(home.parent)
+        temporary = '.dosuti-home-' + uuid.uuid4().hex
+        path = home.parent / temporary
+        # Stage complete bytes outside home so simultaneous first initializers
+        # still observe an empty directory. Unknown leftovers are never deleted.
+        owner.text(home.parent, parent, temporary,
+                   json.dumps(dict(schema='dosuti_home_v1', id=uuid.uuid4().hex), indent=2))
+        owner.check()
+        try:
+            move_exclusive(parent, temporary, owner.fd, MARKER)
+        except FileExistsError:
+            # The winner is immutable: validate it, never replace its ID.
+            owner.guard.check()
+        else:
+            known = owner.files.pop(path.absolute())
+            owner.files[(home / MARKER).absolute()] = (owner.fd, MARKER, known[2], known[3])
+            owner.check()
+        owner.guard.check()
+        result = validate(home)
+        owner.guard.check()
+        return result
 
 
 def find_home(scope):

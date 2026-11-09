@@ -2,7 +2,7 @@
 import json
 import os
 import hashlib
-from contextlib import nullcontext
+from contextlib import nullcontext, closing
 from pathlib import Path
 import shutil
 import subprocess
@@ -10,10 +10,12 @@ import sys
 from urllib.parse import urlsplit, quote
 import uuid
 import tempfile
-from atomic_files import atomic_json
+from safe_material_import import Attempt, move_exclusive, stamp
+from safe_zip_import import identity
 from download_diagnostics import record as record_download_status
 from source_integrity import digest, file_hash, safe_asset
 from storage_lock import file_lock
+from temporary_retention import preserve_temporary
 from storage_paths import source_kind, local_path
 from preparation_control import run as preparation_run
 from download_space import ensure as ensure_download_space
@@ -222,10 +224,19 @@ def acquire(directory, video, fragments=4, site_timeout=1800, quality='best'):
         return path
     assets = Path(directory) / 'video'
     assets.mkdir(exist_ok=True)
-    with file_lock(assets / '.download.lock'):
+    with file_lock(assets / '.download.lock'), closing(Attempt(assets.absolute(), lesson=False)) as publication:
         ready = cached(assets, video)
         if ready:
             return ready
+        # Pin any existing receipt before fetching; cached() has validated it.
+        receipt = None
+        if (assets / 'download.json').exists():
+            with publication.input(assets / 'download.json') as stream:
+                raw = stream.read()
+                receipt = json.loads(raw)
+                publication.files[(assets / 'download.json').absolute()] = (
+                    publication.fd, 'download.json', identity(os.fstat(stream.fileno())),
+                    hashlib.sha256(raw).hexdigest())
         parsed = urlsplit(source)
         resumable = (parsed.hostname in ('disk.yandex.ru', 'disk.yandex.com', 'yadi.sk')
                      or Path(parsed.path).suffix.lower() in MEDIA_EXTENSIONS)
@@ -233,7 +244,7 @@ def acquire(directory, video, fragments=4, site_timeout=1800, quality='best'):
         if staging.is_symlink():
             raise ValueError('Download staging must not be a symbolic link')
         staging.mkdir(exist_ok=resumable)
-        complete = False
+        staging_fd = publication.guard.pin(staging.absolute())
         site = not resumable
         if site:
             record_download_status(assets, source, status='running',adapter='yt-dlp',fragments=fragments,timeout=site_timeout)
@@ -248,16 +259,61 @@ def acquire(directory, video, fragments=4, site_timeout=1800, quality='best'):
                     downloaded, adapter = fetch_site(source, staging, fragments, site_timeout, quality)
             checksum = check_hash(downloaded, video.get('sha256'))
             validate_media(downloaded)
-            # Unique immutable asset prevents overwriting an older cached file.
-            name = 'video-' + uuid.uuid4().hex + downloaded.suffix.lower()
+            # Every final write stays relative to the original pinned directories.
+            publication.guard.check()
+            name = receipt['file'] if receipt else 'video-' + uuid.uuid4().hex + downloaded.suffix.lower()
+            if not isinstance(name, str) or Path(name).name != name or name in ('', '.', '..'):
+                raise ValueError('Invalid video cache filename')
             target = assets / name
-            downloaded.replace(target)
-            atomic_json(assets / 'download.json', dict(schema_version=1, source=source,
-                adapter=adapter, file=name, size=target.stat().st_size, sha256=checksum))
-            complete = True
+            if downloaded.parent.absolute() != staging.absolute():
+                raise ValueError('Downloaded video is outside the pinned staging directory')
+            with publication.input(downloaded) as stream:
+                info = os.fstat(stream.fileno())
+                verified = hashlib.sha256()
+                while block := stream.read(1024 * 1024):
+                    verified.update(block)
+                if verified.hexdigest() != checksum:
+                    raise ValueError('Downloaded video changed before publication')
+                if info.st_nlink != 1:
+                    raise ValueError('Downloaded video must be a private ordinary file')
+                if receipt and (receipt['sha256'] != checksum or receipt['size'] != info.st_size):
+                    raise ValueError('Downloaded video does not match the retained cache receipt')
+            # input() must finish its full stamp check BEFORE our own rename:
+            # rename may change ctime even though the bytes are unchanged.
+            publication.guard.check()
+            before_move = os.stat(downloaded.name, dir_fd=staging_fd, follow_symlinks=False)
+            if stamp(before_move) != stamp(info):
+                raise ValueError('Downloaded video changed before publication')
+            move_exclusive(staging_fd, downloaded.name, publication.fd, name)
+            current = os.stat(name, dir_fd=publication.fd, follow_symlinks=False)
+            # Only ctime may change as a consequence of this authorized rename.
+            def moved_stamp(value):
+                return (value.st_dev, value.st_ino, value.st_mode, value.st_nlink,
+                        value.st_size, value.st_mtime_ns, value.st_uid, value.st_gid)
+            if moved_stamp(current) != moved_stamp(info):
+                raise ValueError('Video cache asset changed during publication')
+            publication.files[target.absolute()] = (publication.fd, name, identity(info), checksum)
+            # Reopen no-follow relative to the pinned destination and rehash. This
+            # catches source-name substitution during rename and changed bytes.
+            publication.check()
+            if not receipt:
+                temporary = '.download-' + uuid.uuid4().hex + '.json'
+                publication.text(assets, publication.fd, temporary, json.dumps(dict(
+                    schema_version=1, source=source, adapter=adapter, file=name,
+                    size=info.st_size, sha256=checksum), ensure_ascii=False, allow_nan=False))
+                publication.check()
+                move_exclusive(publication.fd, temporary, publication.fd, 'download.json')
+                # The temporary binding moved; keep its inode/hash under the final name.
+                known = publication.files.pop((assets / temporary).absolute())
+                publication.files[(assets / 'download.json').absolute()] = (
+                    known[0], 'download.json', known[2], known[3])
+            publication.check()
+            if identity(os.stat(name, dir_fd=publication.fd, follow_symlinks=False)) != identity(info):
+                raise ValueError('Video cache asset was replaced; nothing registered')
             if site:
                 record_download_status(assets, source, status='ready',adapter=adapter,fragments=fragments,timeout=site_timeout)
-            return target.resolve()
+            publication.guard.check()
+            return target.absolute()
         except (Exception, KeyboardInterrupt) as error:
             if site:
                 marker = assets / 'download-status.json'
@@ -268,5 +324,4 @@ def acquire(directory, video, fragments=4, site_timeout=1800, quality='best'):
                         fragments=fragments,timeout=site_timeout)
             raise
         finally:
-            if complete or not resumable or not any(staging.glob('*.resume.json')):
-                shutil.rmtree(staging, ignore_errors=True)
+            preserve_temporary(staging)

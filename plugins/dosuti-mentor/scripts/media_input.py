@@ -1,5 +1,7 @@
 """Bounded-memory media inventory and timeline-preserving audio extraction."""
 import math
+from contextlib import ExitStack
+import tempfile
 from pathlib import Path
 import subprocess
 from preparation_control import run as preparation_run
@@ -63,11 +65,17 @@ def timeline_end(media):
     return max(ends)
 
 
+def wave_input(path):
+    if hasattr(path, 'read'):
+        path.seek(0); return path
+    return str(path)
+
+
 def signal_stats(path):
     total = 0
     squares = mono_squares = None
     peaks = None
-    with wave.open(str(path), 'rb') as audio:
+    with wave.open(wave_input(path), 'rb') as audio:
         channels = audio.getnchannels()
         while raw := audio.readframes(16000 * 10):
             values = np.frombuffer(raw, dtype='<i2').reshape(-1, channels).astype(np.float64)
@@ -84,7 +92,7 @@ def signal_stats(path):
                 mono_rms=math.sqrt(mono_squares / total), samples=total, channels=channels)
 
 
-def extract_audio(video, folder, start, duration, media, ffmpeg, audio_track=None, audio_channel=None, threads=None):
+def extract_audio(video, folder, start, duration, media, ffmpeg, audio_track=None, audio_channel=None, threads=None, storage=None):
     """Track numbers are absolute stream indexes; channel numbers are zero based."""
     tracks = media['audio']
     if audio_track is not None:
@@ -95,20 +103,24 @@ def extract_audio(video, folder, start, duration, media, ffmpeg, audio_track=Non
         raise ValueError('Cannot select a channel without audio')
     candidates = []
     paths = []
+    stack = ExitStack()
     try:
         for track in tracks:
             if not track['channels'] or track['channels'] > 8:
                 raise ValueError('Audio layout is unsupported; provide a mono/stereo source')
             target = folder / f'audio-track-{track["index"]}.staging.wav'
-            paths.append(target)
+            if storage is None: paths.append(target)
+            else: target = stack.enter_context(tempfile.TemporaryFile())
             # first_pts=0 pads a late first packet after input seeking; apad keeps the visual tail.
             result = preparation_run([ffmpeg, '-hide_banner', '-loglevel', 'error', '-xerror', '-y',
                 *(['-threads', str(threads), '-filter_threads', str(threads)] if threads else []),
                 '-ss', str(start), '-i', str(video), '-map', f'0:{track["index"]}', '-vn',
                 '-af', f'aresample=16000:async=1:first_pts=0,apad=whole_dur={duration}',
                 '-ar', '16000', '-t', str(duration), '-c:a', 'pcm_s16le',
-                *(['-threads', str(threads)] if threads else []), str(target)],
-                check=True, capture_output=True, text=True, process_group=False, timeout=max(120, duration * 10))
+                *(['-threads', str(threads)] if threads else []),
+                *(['-f', 'wav', 'pipe:1'] if storage else [str(target)])],
+                check=True, text=True, process_group=False, timeout=max(120, duration * 10),
+                **(dict(stdout=target,stderr=subprocess.PIPE) if storage else dict(capture_output=True)))
             errors = decoding_errors(result.stderr)
             if errors:
                 raise ValueError('Damaged audio: ' + '; '.join(errors)[:600])
@@ -119,11 +131,12 @@ def extract_audio(video, folder, start, duration, media, ffmpeg, audio_track=Non
             raise ValueError('Multiple nonempty audio tracks; choose --audio-track: ' +
                              ', '.join(str(r['track']['index']) for r in audible))
         selected = (audible or candidates or [None])[0]
-        output = folder / 'audio.staging.wav'
+        output = folder / (storage.audio_name() if storage else 'audio.staging.wav')
+        output_stream = stack.enter_context(storage.output(folder, output.name)) if storage else output
         warnings = []
         channel = audio_channel
         if selected is None:
-            with wave.open(str(output), 'wb') as wav:
+            with wave.open(output_stream if storage else str(output), 'wb') as wav:
                 wav.setparams((1, 2, 16000, 0, 'NONE', 'not compressed'))
                 remaining = round(duration * 16000)
                 while remaining:
@@ -137,13 +150,13 @@ def extract_audio(video, folder, start, duration, media, ffmpeg, audio_track=Non
             # Strong cancellation means averaging destroys information. Pick the strongest channel and disclose.
             channel = int(np.argmax(stats['channel_rms']))
             warnings.append('channel_cancellation_using_single_channel')
-        with wave.open(str(selected['file']), 'rb') as source, wave.open(str(output), 'wb') as target:
+        with wave.open(wave_input(selected['file']), 'rb') as source, wave.open(output_stream if storage else str(output), 'wb') as target:
             target.setparams((1, 2, 16000, 0, 'NONE', 'not compressed'))
             while raw := source.readframes(160000):
                 values = np.frombuffer(raw, dtype='<i2').reshape(-1, stats['channels']).astype(np.float64)
                 mono = values[:, channel] if channel is not None else values.mean(axis=1)
                 target.writeframes(np.rint(mono).clip(-32768, 32767).astype('<i2').tobytes())
-        final_stats = signal_stats(output)
+        final_stats = signal_stats(output_stream if storage else output)
         silent = max(final_stats['channel_peaks']) <= 8
         if silent: warnings.append('selected_audio_is_silent')
         return output, dict(status='silent' if silent else 'signal_present_unverified',
@@ -152,5 +165,6 @@ def extract_audio(video, folder, start, duration, media, ffmpeg, audio_track=Non
             warnings=warnings, tracks=media['audio'], signal=stats, output_signal=final_stats,
             timeline=dict(source_start=start, samples_per_second=16000, padding_preserves_source_time=True))
     finally:
+        stack.close()
         for path in paths:
             path.unlink(missing_ok=True)

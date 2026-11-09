@@ -17,6 +17,7 @@ from unittest.mock import patch
 SCRIPTS = Path(__file__).resolve().parents[1] / 'scripts'
 sys.path.insert(0, str(SCRIPTS))
 import course
+import safe_material_import as material
 import lecture
 import tutor_packet
 from source_integrity import evidence_hashes
@@ -138,7 +139,7 @@ class SourceIntegrityRegression(unittest.TestCase):
     def test_corrupt_frame_cannot_resume(self):
         result, folder = self.extract()
         self.assertEqual(result.returncode, 0, result.stderr)
-        next((folder / 'frames').glob('*.jpg')).write_bytes(b'Changed image')
+        (folder / course.read(folder / 'manifest.json')['frames'][0]['file']).write_bytes(b'Changed image')
         result, _ = self.extract(resume=True)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('integrity changed', result.stderr)
@@ -189,19 +190,19 @@ class SourceIntegrityRegression(unittest.TestCase):
 
     def test_modified_frame_is_rejected_before_import(self):
         folder = self.bundle()
-        next((folder / 'frames').glob('*.jpg')).write_bytes(b'Wrong frame')
+        (folder / course.read(folder / 'manifest.json')['frames'][0]['file']).write_bytes(b'Wrong frame')
         with self.assertRaisesRegex(ValueError, 'integrity changed'):
             self.register(folder)
 
     def test_corruption_during_import_copy_is_rejected_before_publication(self):
         folder = self.bundle()
-        original = course.shutil.copyfile
-        def corrupted(source, destination, *args, **kw):
-            result = original(source, destination, *args, **kw)
-            if Path(destination).name == 'transcript.json':
-                Path(destination).write_text('[]')
+        original = material.Attempt.copy
+        def corrupted(attempt,source,parent,name,*args,**kw):
+            result = original(attempt,source,parent,name,*args,**kw)
+            if name == 'transcript.json':
+                target=Path(kw['destination']);target.chmod(0o600);target.write_text('[]')
             return result
-        with patch.object(course.shutil, 'copyfile', corrupted):
+        with patch.object(material.Attempt, 'copy', corrupted):
             with self.assertRaisesRegex(ValueError, 'integrity changed'):
                 self.register(folder)
         self.assertEqual(self.state()['prepared_fragments'], [])
@@ -218,7 +219,7 @@ class SourceIntegrityRegression(unittest.TestCase):
     def test_modified_selected_frame_is_rejected_by_context(self):
         self.register(self.bundle())
         folder = Path(self.state()['prepared_fragments'][0]['folder'])
-        next((folder / 'frames').glob('*.jpg')).write_bytes(b'Edited frame')
+        selected=(folder / course.read(folder / 'manifest.json')['frames'][0]['file']);selected.chmod(0o600);selected.write_bytes(b'Edited frame')
         with self.assertRaisesRegex(ValueError, 'frame integrity'):
             self.capture(course.context, time=0, window=2)
 
