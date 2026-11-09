@@ -102,9 +102,9 @@ class PluginManifest(unittest.TestCase):
         version = read('plugin.json')['version']
         readme = (REPO / 'README.md').read_text(encoding='utf-8')
         changelog = (REPO / 'CHANGELOG.md').read_text(encoding='utf-8')
-        development = re.search(r'^Версия разработки: \*\*([0-9.]+)\*\*', readme, re.M)
-        self.assertIsNotNone(development)
-        self.assertEqual(development.group(1), version)
+        package = re.search(r'^Версия пакета: \*\*([0-9.]+)\*\*', readme, re.M)
+        self.assertIsNotNone(package)
+        self.assertEqual(package.group(1), version)
         first = re.search(r'^## (\d+\.\d+\.\d+)\b', changelog, re.M)
         self.assertIsNotNone(first)
         self.assertEqual(first.group(1), version)
