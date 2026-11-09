@@ -14,7 +14,7 @@ import bootstrap
 class Bootstrap(unittest.TestCase):
     def test_dependency_probe_rejects_missing_pdf_and_incompatible_versions(self):
         versions = {'faster-whisper': '1.2.1', 'imageio-ffmpeg': '0.6.0',
-                    'Pillow': '11.3.0', 'certifi': '2026.1.1', 'yt-dlp': '2026.1',
+                    'Pillow': '13.0.0', 'certifi': '2026.1.1', 'yt-dlp': '2026.1',
                     'av': '16.0.0', 'pdfplumber': '0.11.9', 'packaging': '26.3'}
         # Execute the actual probe in a child; only dependency boundaries are fixtures.
         for missing, overrides in [(None, {}),
@@ -22,6 +22,8 @@ class Bootstrap(unittest.TestCase):
                                                              'faster_whisper', 'PIL', 'yt_dlp',
                                                              'imageio_ffmpeg', 'packaging')],
                                    *[(None, {name: '0.0.1'}) for name in versions if name != 'certifi'],
+                                   (None, {'Pillow': '12.3.0'}),
+                                   (None, {'Pillow': '14.0.0'}),
                                    (None, {'pdfplumber': '0.12.0'}),
                                    (None, {'pdfplumber': '0.11.9rc1'})]:
             with self.subTest(missing=missing, versions=overrides):
